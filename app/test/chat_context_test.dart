@@ -40,6 +40,7 @@ void main() {
     expect(memory, contains('green'));
     expect(memory, isNot(contains('red')));
     expect(ChatContext.explicitMemory('Hi'), isNull);
+    expect(ChatContext.explicitMemory('My name is Alex.'), 'My name is Alex.');
   });
 
   test(

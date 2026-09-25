@@ -45,6 +45,11 @@ class ChatContext {
       dotAll: true,
     ).firstMatch(cleaned);
     if (correction != null) return correction.group(1)!.trim();
+    if (RegExp(
+      r'^(?:my name is|call me|i (?:like|prefer|love|hate))\b',
+      caseSensitive: false,
+    ).hasMatch(cleaned))
+      return cleaned;
     return null;
   }
 

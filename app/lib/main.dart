@@ -611,13 +611,42 @@ class _ChatScreenState extends State<ChatScreen> {
             break;
           }
         }
+        // A portable ZIP may be extracted to a new folder on upgrade. Keep
+        // existing model selections working when the old folder is removed.
+        for (final item in models) {
+          if (await File(item.path).exists()) continue;
+          final oldPath = item.path;
+          final filename = oldPath.split(RegExp(r'[/\\]')).last;
+          for (final folder in [
+            'smolvlm2-500m',
+            'qwen25-1.5b-abliterated',
+            'qwen35-4b-uncensored',
+            'qwen3-4b-nymphaea-rp',
+          ]) {
+            final candidate = '$executableDir/models/$folder/$filename';
+            if (await File(candidate).exists()) {
+              item.path = candidate;
+              if (modelPath == oldPath) modelPath = candidate;
+              final projector = item.projector;
+              if (projector != null) {
+                final projectorName = projector.split(RegExp(r'[/\\]')).last;
+                final newProjector =
+                    '$executableDir/models/$folder/$projectorName';
+                if (await File(newProjector).exists())
+                  item.projector = newProjector;
+              }
+              break;
+            }
+          }
+        }
       }
       if (routingVersion == 0 &&
           models.any((item) => item.vision) &&
           models.any((item) => !item.vision)) {
         modelPath = autoModelPath;
       }
-      if (speechRoot == null) {
+      if (speechRoot == null ||
+          (Platform.isWindows && !await SpeechService.hasModels(speechRoot!))) {
         final executableDir = File(Platform.resolvedExecutable).parent.path;
         final packagedSpeech = '$executableDir/speech';
         speechRoot =
