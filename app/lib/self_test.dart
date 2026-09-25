@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_video_thumbnail_plus/flutter_video_thumbnail_plus.dart';
 import 'package:lib_llama_cpp/lib_llama_cpp.dart';
+import 'package:crypto/crypto.dart';
 
 import 'speech_service.dart';
 import 'video_duration.dart';
@@ -173,11 +174,22 @@ Future<void> runSelfTest(List<String> args) async {
       );
       parts.add(LlamaImageFilePart(path: thumbnail));
     }
-    return {
-      'durationMs': duration,
-      'frames': frames,
-      'answer': await ask(parts, maxTokens: 32),
-    };
+    final firstHash = await sha256
+        .bind(File(frames[0]['path']! as String).openRead())
+        .first;
+    final secondHash = await sha256
+        .bind(File(frames[1]['path']! as String).openRead())
+        .first;
+    if (firstHash.toString() == secondHash.toString()) {
+      throw StateError('Video frame seeking returned the same frame twice.');
+    }
+    final answer = await ask(parts, maxTokens: 32);
+    final red = answer.toLowerCase().indexOf('red');
+    final green = answer.toLowerCase().indexOf('green');
+    if (red < 0 || green < 0 || red >= green) {
+      throw StateError('Video answer did not identify red then green: $answer');
+    }
+    return {'durationMs': duration, 'frames': frames, 'answer': answer};
   }, timeout: const Duration(minutes: 8));
   await stopIfFailed('video');
   final speech = SpeechService('D:/LocalAIChat/speech');

@@ -34,7 +34,8 @@ dependencies:
     path: vendor/lib_llama_cpp
   file_picker: 10.3.10
   path_provider: 2.1.5
-  flutter_video_thumbnail_plus: 1.0.7
+  flutter_video_thumbnail_plus:
+    path: vendor/flutter_video_thumbnail_plus
   media_metadata: 2.2.2
   record: 7.1.1
   sherpa_onnx: 1.13.8

@@ -1,0 +1,53 @@
+name: flutter_video_thumbnail_plus
+description: A Flutter plugin for generating video thumbnails from video files,
+  URLs, and byte arrays with support for multiple image formats and
+  customization options.
+
+version: 1.0.7
+
+homepage: https://github.com/rahulsaryam285/flutter_video_thumbnail_plus
+repository: https://github.com/rahulsaryam285/flutter_video_thumbnail_plus
+issue_tracker: https://github.com/rahulsaryam285/flutter_video_thumbnail_plus/issues
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  flutter_web_plugins:
+    sdk: flutter
+
+  plugin_platform_interface: ^2.1.8
+  web: ^1.1.1
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+topics:
+  - video
+  - thumbnail
+  - flutter-plugin
+  - media
+  - image-processing
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.example.flutter_video_thumbnail_plus
+        pluginClass: FlutterVideoThumbnailPlusPlugin
+      ios:
+        pluginClass: FlutterVideoThumbnailPlusPlugin
+      macos:
+        pluginClass: FlutterVideoThumbnailPlusPlugin
+      windows:
+        pluginClass: FlutterVideoThumbnailPlusPluginCApi
+      web:
+        pluginClass: FlutterVideoThumbnailPlusWeb
+        fileName: flutter_video_thumbnail_plus_web.dart
+  uses-material-design: false
