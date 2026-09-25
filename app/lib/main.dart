@@ -34,13 +34,14 @@ class LocalChatApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'Local AI Chat',
+    debugShowCheckedModeBanner: false,
     theme: ThemeData(colorSchemeSeed: Colors.deepPurple, useMaterial3: true),
     darkTheme: ThemeData(
       colorSchemeSeed: Colors.deepPurple,
       brightness: Brightness.dark,
       useMaterial3: true,
     ),
-    themeMode: ThemeMode.system,
+    themeMode: ThemeMode.dark,
     home: const ChatScreen(),
   );
 }
@@ -161,6 +162,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Conversation get chat => chats.firstWhere((item) => item.id == chatId);
   LocalModel? get selectedModel {
+    if (attachments.isNotEmpty) {
+      for (final model in models) {
+        if (model.path == modelPath && model.vision) return model;
+      }
+      for (final model in models) {
+        if (model.vision) return model;
+      }
+    }
     if (modelPath == autoModelPath) {
       if (attachments.isNotEmpty) {
         for (final model in models) {
@@ -428,10 +437,13 @@ class _ChatScreenState extends State<ChatScreen> {
             : dataDir!.path + Platform.pathSeparator + 'speech';
       }
       speech = SpeechService(speechRoot!);
-      if (mounted)
+      if (mounted) {
         setState(
-          () => status = 'Ready. All chat inference stays on this device.',
+          () => status = models.isEmpty
+              ? 'Get a local model to begin. Chat stays on this device.'
+              : 'Ready. All chat inference stays on this device.',
         );
+      }
       await save();
     } catch (error) {
       if (mounted)
