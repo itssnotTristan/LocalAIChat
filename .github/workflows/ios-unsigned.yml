@@ -45,11 +45,12 @@ jobs:
       - name: Capture iPhone simulator preview
         working-directory: app
         run: |
-          simulator=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.isAvailable and .name == "iPhone 17 Air") | .udid][0] // empty')
+          simulator=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.isAvailable and (.name == "iPhone Air" or .name == "iPhone 17 Air")) | .udid][0] // empty')
           if [ -z "$simulator" ]; then
             simulator=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.isAvailable and (.name | startswith("iPhone"))) | .udid][0] // empty')
           fi
           test -n "$simulator"
+          xcrun simctl list devices available | grep "$simulator"
           xcrun simctl boot "$simulator" || true
           xcrun simctl bootstatus "$simulator" -b
           flutter build ios --simulator --no-pub
