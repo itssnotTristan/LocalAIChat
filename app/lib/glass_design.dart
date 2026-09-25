@@ -125,10 +125,12 @@ class GlassSurface extends StatelessWidget {
     super.key,
     this.padding = const EdgeInsets.all(14),
     this.radius = 22,
+    this.highlight = false,
   });
   final Widget child;
   final EdgeInsets padding;
   final double radius;
+  final bool highlight;
   @override
   Widget build(BuildContext context) {
     final design = GlassDesign.of(context);
@@ -140,26 +142,44 @@ class GlassSurface extends StatelessWidget {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(radius),
         border: Border.all(
-          color: (light ? Colors.white : palette.text).withValues(
-            alpha: light
-                ? 0.72
-                : quiet
-                ? 0.12
-                : 0.29,
-          ),
+          color:
+              (highlight
+                      ? palette.accent
+                      : (light ? Colors.white : palette.text))
+                  .withValues(
+                    alpha: highlight
+                        ? 0.55
+                        : light
+                        ? 0.72
+                        : quiet
+                        ? 0.12
+                        : 0.29,
+                  ),
         ),
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
             (light ? Colors.white : palette.accent).withValues(
-              alpha: light
+              alpha: highlight
+                  ? (light
+                        ? 0.58
+                        : quiet
+                        ? 0.22
+                        : 0.35)
+                  : light
                   ? 0.40
                   : quiet
                   ? 0.07
                   : 0.18,
             ),
-            palette.base2.withValues(alpha: light ? 0.34 : 0.70),
+            palette.base2.withValues(
+              alpha: highlight
+                  ? 0.84
+                  : light
+                  ? 0.34
+                  : 0.70,
+            ),
           ],
         ),
         boxShadow: [

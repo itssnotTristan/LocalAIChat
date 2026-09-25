@@ -1620,9 +1620,32 @@ class _ChatScreenState extends State<ChatScreen> {
       child: GlassSurface(
         padding: const EdgeInsets.all(13),
         radius: 16,
+        highlight: entry.role == 'user',
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  entry.role == 'user'
+                      ? Icons.person_outline
+                      : Icons.auto_awesome,
+                  size: 14,
+                  color: GlassPalette.resolve(themeName, customColor).accent,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  entry.role == 'user' ? 'You' : 'Local AI',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 7),
             for (final frame in entry.frames) ...[
               if (frame.timeMs != null)
                 Text(
@@ -1792,6 +1815,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: chats.isEmpty
                         ? const Center(child: CircularProgressIndicator())
                         : ListView.builder(
+                            keyboardDismissBehavior:
+                                ScrollViewKeyboardDismissBehavior.onDrag,
                             itemCount: chat.entries.length,
                             itemBuilder: (context, index) =>
                                 messageBubble(chat.entries[index]),
