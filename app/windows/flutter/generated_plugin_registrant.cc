@@ -1,0 +1,23 @@
+//
+//  Generated file. Do not edit.
+//
+
+// clang-format off
+
+#include "generated_plugin_registrant.h"
+
+#include <audioplayers_windows/audioplayers_windows_plugin.h>
+#include <flutter_video_thumbnail_plus/flutter_video_thumbnail_plus_plugin_c_api.h>
+#include <media_metadata/media_metadata_plugin_c_api.h>
+#include <record_windows/record_windows_plugin_c_api.h>
+
+void RegisterPlugins(flutter::PluginRegistry* registry) {
+  AudioplayersWindowsPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("AudioplayersWindowsPlugin"));
+  FlutterVideoThumbnailPlusPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("FlutterVideoThumbnailPlusPluginCApi"));
+  MediaMetadataPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("MediaMetadataPluginCApi"));
+  RecordWindowsPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("RecordWindowsPluginCApi"));
+}

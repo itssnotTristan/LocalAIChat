@@ -1,0 +1,44 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.47.5'
+          cache: true
+      - name: Check toolchain
+        run: |
+          xcodebuild -version
+          flutter --version
+      - name: Fetch dependencies
+        working-directory: app
+        run: flutter pub get
+      - name: Analyze and test
+        working-directory: app
+        run: |
+          dart analyze lib test tools --fatal-warnings
+          flutter test --no-pub
+      - name: Build for physical iPhone without cloud-held credentials
+        working-directory: app
+        run: flutter build ios --release --no-codesign --no-pub
+      - name: Package IPA for local signing with AltStore
+        working-directory: app
+        run: |
+          test -d build/ios/iphoneos/Runner.app
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/Runner.app
+          zip -qry LocalAIChat-unsigned.ipa Payload
+          unzip -t LocalAIChat-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalAIChat-unsigned-IPA
+          path: app/LocalAIChat-unsigned.ipa
+          retention-days: 7

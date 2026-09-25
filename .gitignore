@@ -1,0 +1,7 @@
+.localappdata/
+.gradle-cache/
+.gradle-fast/
+artifacts/
+*.zip
+*.ipa
+*.apk
