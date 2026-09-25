@@ -34,6 +34,11 @@ class ModelDownloader {
       'f3a2e8f1837f52247a5b7b28f379923c98cc38fa8b339a943ba49b518be8b562';
   static const detailedProjectorSha256 =
       '04a3af332afa255093f04b1a95ae1065637c140b8b365f721f0be89b62ae2d16';
+  static const roleplayUrl =
+      'https://huggingface.co/mradermacher/Qwen3-4B-Nymphaea-RP-GGUF/resolve/main/';
+  static const roleplayName = 'Qwen3-4B-Nymphaea-RP.Q4_K_M.gguf';
+  static const roleplaySha256 =
+      '7896e1c1e498554887ea6439c44939216f67146fa3c3298ee7a95c2cf206376d';
 
   void cancel() {
     _cancelled = true;
@@ -114,6 +119,28 @@ class ModelDownloader {
         baseUrl: detailedVisionUrl,
       );
       return StarterModelFiles(model, projector);
+    } finally {
+      _client?.close();
+      _client = null;
+    }
+  }
+
+  Future<String> downloadRoleplay(
+    String directory,
+    void Function(String name, int received, int? total) onProgress,
+  ) async {
+    _cancelled = false;
+    _client = HttpClient();
+    final folder = Directory(directory);
+    await folder.create(recursive: true);
+    try {
+      return await _downloadOne(
+        folder,
+        roleplayName,
+        roleplaySha256,
+        onProgress,
+        baseUrl: roleplayUrl,
+      );
     } finally {
       _client?.close();
       _client = null;

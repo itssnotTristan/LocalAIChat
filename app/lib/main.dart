@@ -7,8 +7,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lib_llama_cpp/lib_llama_cpp.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'glass_design.dart';
+import 'chat_context.dart';
+import 'fish_voice.dart';
 import 'speech_service.dart';
 import 'self_test.dart';
 import 'gguf_info.dart';
@@ -30,6 +33,18 @@ Future<void> main(List<String> args) async {
   }
   if (args.isNotEmpty && args.first == '--probe-vision') {
     await runVisionProbe(args);
+    exit(0);
+  }
+  if (args.isNotEmpty && args.first == '--self-test-voices') {
+    await runVoiceSelfTest(args);
+    exit(0);
+  }
+  if (args.isNotEmpty && args.first == '--self-test-personality') {
+    await runPersonalitySelfTest(args);
+    exit(0);
+  }
+  if (args.isNotEmpty && args.first == '--self-test-keychain') {
+    await runKeychainSelfTest(args);
     exit(0);
   }
   runApp(const LocalChatApp());
@@ -112,16 +127,40 @@ List<ChatEntry> textHistorySinceMedia(List<ChatEntry> history) {
       : textHistory;
 }
 
+bool isMediaFollowup(String text) {
+  if (RegExp(
+    r'^(?:no|actually|correction)\b',
+    caseSensitive: false,
+  ).hasMatch(text.trim()))
+    return true;
+  return RegExp(
+    r'\b(?:look again|recheck|review the footage|the (?:video|image|photo|clip|frame)|what(?:\x27s| is) happening|that(?:\x27s| is) (?:my|her|him))\b',
+    caseSensitive: false,
+  ).hasMatch(text);
+}
+
 class Conversation {
-  Conversation(this.id, this.title, [List<ChatEntry>? entries])
-    : entries = entries ?? [];
+  Conversation(
+    this.id,
+    this.title, [
+    List<ChatEntry>? entries,
+    this.personality = 'Default',
+    this.customPersonality = '',
+    this.memory = '',
+  ]) : entries = entries ?? [];
   String id;
   String title;
   List<ChatEntry> entries;
+  String personality;
+  String customPersonality;
+  String memory;
   Map<String, dynamic> toJson() => {
     'id': id,
     'title': title,
     'entries': entries.map((entry) => entry.toJson()).toList(),
+    'personality': personality,
+    'customPersonality': customPersonality,
+    'memory': memory,
   };
   factory Conversation.fromJson(Map<String, dynamic> data) => Conversation(
     data['id'] as String,
@@ -132,6 +171,9 @@ class Conversation {
               ChatEntry.fromJson(Map<String, dynamic>.from(entry as Map)),
         )
         .toList(),
+    data['personality'] as String? ?? 'Default',
+    data['customPersonality'] as String? ?? '',
+    data['memory'] as String? ?? '',
   );
 }
 
@@ -167,6 +209,15 @@ class _ChatScreenState extends State<ChatScreen> {
   bool voiceRecording = false;
   bool voiceWorking = false;
   bool autoSpeak = true;
+  int selectedVoice = 5;
+  String voiceSource = 'Offline';
+  String fishVoiceId = '';
+  bool fishHasKey = false;
+  bool callActive = false;
+  bool callMuted = false;
+  final ValueNotifier<String> callStatus = ValueNotifier('Ready to call');
+  int callEpoch = 0;
+  bool callSendNow = false;
   int voiceEpoch = 0;
   final ModelDownloader downloader = ModelDownloader();
   bool downloading = false;
@@ -233,6 +284,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    callEpoch++;
+    callStatus.dispose();
     draft.dispose();
     downloader.cancel();
     speechDownloader.cancel();
@@ -364,6 +417,42 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> downloadRoleplayModel() async {
+    if (downloading || dataDir == null) return;
+    final directory = dataDir!.path + Platform.pathSeparator + 'models';
+    setState(() {
+      downloading = true;
+      status = 'Downloading adult roleplay model (about 2.5 GB)…';
+    });
+    var lastShownMiB = -1;
+    try {
+      final path = await downloader.downloadRoleplay(directory, (
+        name,
+        received,
+        total,
+      ) {
+        final currentMiB = received ~/ 1048576;
+        if (currentMiB == lastShownMiB || !mounted) return;
+        lastShownMiB = currentMiB;
+        setState(
+          () => status =
+              'Downloading $name · $currentMiB MiB' +
+              (total == null ? '' : ' / ${total ~/ 1048576} MiB'),
+        );
+      });
+      if (!models.any((item) => item.path == path)) {
+        models.add(LocalModel('Nymphaea 4B · adult roleplay', path));
+      }
+      modelPath = path;
+      setState(() => status = 'Roleplay model passed SHA-256 verification.');
+      await save();
+    } catch (error) {
+      if (mounted) showProblem('Roleplay model download failed: $error');
+    } finally {
+      if (mounted) setState(() => downloading = false);
+    }
+  }
+
   Future<void> downloadSpeechModels() async {
     final root = speechRoot;
     if (root == null || downloadingSpeech) return;
@@ -454,6 +543,11 @@ class _ChatScreenState extends State<ChatScreen> {
         motionSpeed = (data['motionSpeed'] as num?)?.toDouble() ?? 1.0;
         speechRoot = data['speechRoot'] as String?;
         autoSpeak = data['autoSpeak'] as bool? ?? true;
+        selectedVoice = data['selectedVoice'] as int? ?? 5;
+        if (!SpeechService.voices.any((item) => item.id == selectedVoice))
+          selectedVoice = 5;
+        voiceSource = data['voiceSource'] as String? ?? 'Offline';
+        fishVoiceId = data['fishVoiceId'] as String? ?? '';
       }
       if (chats.isEmpty) createChat(saveNow: false);
       if (!chats.any((item) => item.id == chatId)) chatId = chats.first.id;
@@ -506,6 +600,17 @@ class _ChatScreenState extends State<ChatScreen> {
             break;
           }
         }
+        for (final base in [
+          '$executableDir/models/qwen3-4b-nymphaea-rp',
+          'D:/LocalAIChat/models/qwen3-4b-nymphaea-rp',
+        ]) {
+          final path = '$base/${ModelDownloader.roleplayName}';
+          if (await File(path).exists() &&
+              !models.any((item) => item.path == path)) {
+            models.add(LocalModel('Nymphaea 4B · adult roleplay', path));
+            break;
+          }
+        }
       }
       if (routingVersion == 0 &&
           models.any((item) => item.vision) &&
@@ -524,6 +629,11 @@ class _ChatScreenState extends State<ChatScreen> {
             : dataDir!.path + Platform.pathSeparator + 'speech';
       }
       speech = SpeechService(speechRoot!);
+      try {
+        fishHasKey = await FishVoice.hasKey;
+      } catch (_) {
+        fishHasKey = false;
+      }
       if (mounted) {
         setState(
           () => status = models.isEmpty
@@ -573,6 +683,9 @@ class _ChatScreenState extends State<ChatScreen> {
         'motionSpeed': motionSpeed,
         'speechRoot': speechRoot,
         'autoSpeak': autoSpeak,
+        'selectedVoice': selectedVoice,
+        'voiceSource': voiceSource,
+        'fishVoiceId': fishVoiceId,
       }),
     );
     if (await file.exists()) await file.delete();
@@ -580,6 +693,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void createChat({bool saveNow = true}) {
+    if (busy || callActive) return;
     final id = DateTime.now().microsecondsSinceEpoch.toString();
     chats.insert(0, Conversation(id, 'New chat'));
     chatId = id;
@@ -587,6 +701,171 @@ class _ChatScreenState extends State<ChatScreen> {
     attachments.clear();
     if (mounted) setState(() {});
     if (saveNow) unawaited(save());
+  }
+
+  Future<bool> confirmDelete(String title, String message) async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Delete'),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+
+  Future<void> deleteConversation(Conversation item) async {
+    if (busy || callActive) return;
+    if (!await confirmDelete(
+      'Delete conversation?',
+      'This deletes its messages and saved memory from this device.',
+    ))
+      return;
+    final paths = item.entries
+        .expand((entry) => entry.frames.map((frame) => frame.path))
+        .toList();
+    setState(() {
+      chats.remove(item);
+      if (chats.isEmpty) {
+        final id = DateTime.now().microsecondsSinceEpoch.toString();
+        chats.add(Conversation(id, 'New chat'));
+      }
+      if (chatId == item.id) chatId = chats.first.id;
+    });
+    await save();
+    await deleteUnreferencedMedia(paths);
+  }
+
+  Future<void> deleteMessage(ChatEntry entry) async {
+    if (busy || callActive) return;
+    if (!await confirmDelete(
+      'Delete message?',
+      'This removes the message from this conversation.',
+    ))
+      return;
+    final paths = entry.frames.map((frame) => frame.path).toList();
+    setState(() {
+      chat.entries.remove(entry);
+      if (entry.role == 'user') {
+        final remembered = ChatContext.explicitMemory(entry.text);
+        if (remembered != null) {
+          chat.memory = ChatContext.removeMemory(chat.memory, remembered);
+        }
+      }
+    });
+    await save();
+    await deleteUnreferencedMedia(paths);
+  }
+
+  Future<void> deleteUnreferencedMedia(List<String> paths) async {
+    if (dataDir == null) return;
+    final referenced = {
+      for (final item in chats)
+        for (final entry in item.entries)
+          for (final frame in entry.frames) frame.path,
+      for (final frame in attachments) frame.path,
+    };
+    for (final path in paths.toSet()) {
+      final ownedMedia = ['media', 'frames'].any(
+        (folder) => path.startsWith(
+          '${dataDir!.path}${Platform.pathSeparator}$folder${Platform.pathSeparator}',
+        ),
+      );
+      if (!ownedMedia || referenced.contains(path)) continue;
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    }
+  }
+
+  Future<void> showChatOptions() async {
+    if (chats.isEmpty || busy || callActive) return;
+    final current = chat;
+    var personality = current.personality;
+    final custom = TextEditingController(text: current.customPersonality);
+    final memory = TextEditingController(text: current.memory);
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, update) => AlertDialog(
+          title: const Text('This conversation'),
+          content: SizedBox(
+            width: 440,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DropdownButtonFormField<String>(
+                    initialValue:
+                        ChatContext.personalities.containsKey(personality)
+                        ? personality
+                        : 'Default',
+                    decoration: const InputDecoration(labelText: 'Personality'),
+                    items: ChatContext.personalities.keys
+                        .map(
+                          (name) =>
+                              DropdownMenuItem(value: name, child: Text(name)),
+                        )
+                        .toList(),
+                    onChanged: (value) =>
+                        update(() => personality = value ?? personality),
+                  ),
+                  if (personality == 'Custom')
+                    TextField(
+                      controller: custom,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText: 'How should the AI act?',
+                      ),
+                    ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: memory,
+                    maxLines: 5,
+                    decoration: const InputDecoration(
+                      labelText: 'Saved memory',
+                      helperText: 'Facts here are sent with every message in this chat.',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'You can also say “remember that …” or “correction: …” in chat.',
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                setState(() {
+                  current.personality = personality;
+                  current.customPersonality = custom.text.trim();
+                  current.memory = memory.text.trim();
+                });
+                unawaited(save());
+                Navigator.pop(dialogContext);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    custom.dispose();
+    memory.dispose();
   }
 
   Future<String> copyIntoApp(String path, String folder) async {
@@ -930,17 +1209,38 @@ class _ChatScreenState extends State<ChatScreen> {
       );
       return;
     }
+    final prompt = draft.text.trim();
+    final lastMediaIndex = chat.entries.lastIndexWhere(
+      (entry) => entry.role == 'user' && entry.frames.isNotEmpty,
+    );
+    final reuseFrames =
+        attachments.isEmpty &&
+        lastMediaIndex >= 0 &&
+        chat.entries.length - lastMediaIndex <= 4 &&
+        isMediaFollowup(prompt);
+    final inferenceFrames = attachments.isNotEmpty
+        ? List<MediaFrame>.of(attachments)
+        : reuseFrames
+        ? List<MediaFrame>.of(chat.entries[lastMediaIndex].frames)
+        : <MediaFrame>[];
     final initiallySelectedModel = selectedModel;
     if (initiallySelectedModel == null) {
       showProblem('Choose or download a local model before sending.');
       return;
     }
     var model = initiallySelectedModel;
-    if (attachments.isNotEmpty && !model.vision) {
-      for (final candidate in models) {
-        if (candidate.vision) {
-          model = candidate;
-          break;
+    if (inferenceFrames.isNotEmpty && !model.vision) {
+      final detailed = models.where(
+        (candidate) => candidate.vision && candidate.name.contains('Qwen3.5'),
+      );
+      if (detailed.isNotEmpty) {
+        model = detailed.first;
+      } else {
+        for (final candidate in models) {
+          if (candidate.vision) {
+            model = candidate;
+            break;
+          }
         }
       }
       if (!model.vision) {
@@ -967,13 +1267,16 @@ class _ChatScreenState extends State<ChatScreen> {
       );
       return;
     }
-    final prompt = draft.text.trim();
     if (prompt.isEmpty && attachments.isEmpty) return;
     final question = ChatEntry(
       'user',
       prompt.isEmpty ? 'Describe these images.' : prompt,
       List.of(attachments),
     );
+    final remembered = ChatContext.explicitMemory(question.text);
+    if (remembered != null) {
+      chat.memory = ChatContext.addMemory(chat.memory, remembered);
+    }
     final originalVideoPath = currentVideoPath;
     final originalVideoDurationMs = currentVideoDurationMs;
     chat.entries.add(question);
@@ -1007,7 +1310,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // A text-only model cannot inspect previous media. Do not feed it an
       // earlier vision answer as if it were fresh visual evidence.
       final recent = textHistorySinceMedia(history);
-      for (final item in question.frames.isEmpty ? recent : <ChatEntry>[]) {
+      for (final item in inferenceFrames.isEmpty ? recent : <ChatEntry>[]) {
         final text = item.text.length > 900
             ? item.text.substring(0, 900)
             : item.text;
@@ -1019,7 +1322,7 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
       final parts = <LlamaContentPart>[LlamaTextPart(question.text)];
-      for (final frame in question.frames) {
+      for (final frame in inferenceFrames) {
         if (frame.timeMs != null) {
           parts.add(
             LlamaTextPart(
@@ -1048,7 +1351,12 @@ class _ChatScreenState extends State<ChatScreen> {
         model: 'active',
         input: input,
         instructions:
-            '$instructions\nReply to the latest message in your own words. Do not narrate your reasoning or repeat a phrase. Be concise.' +
+            ChatContext.instructions(
+              global: instructions,
+              personality: chat.personality,
+              customPersonality: chat.customPersonality,
+              memory: chat.memory,
+            ) +
             (model.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''),
         maxOutputTokens: maxTokens,
         temperature: 0.65,
@@ -1120,13 +1428,7 @@ class _ChatScreenState extends State<ChatScreen> {
         final reply = chat.entries.isEmpty ? '' : chat.entries.last.text;
         if (reply.isEmpty || reply.startsWith('[')) return;
         setState(() => status = 'Preparing local speech…');
-        final output =
-            dataDir!.path +
-            Platform.pathSeparator +
-            'reply_' +
-            DateTime.now().microsecondsSinceEpoch.toString() +
-            '.wav';
-        final wav = await service.synthesize(reply, output);
+        final wav = await synthesizeReply(reply);
         if (epoch != voiceEpoch) return;
         setState(() => status = 'Speaking. Tap the microphone to interrupt.');
         await service.playFile(wav);
@@ -1170,6 +1472,225 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<String> synthesizeReply(String reply) async {
+    final extension = voiceSource == 'Fish Audio' ? 'mp3' : 'wav';
+    final output =
+        '${dataDir!.path}${Platform.pathSeparator}reply_${DateTime.now().microsecondsSinceEpoch}.$extension';
+    if (voiceSource == 'Fish Audio') {
+      return FishVoice.synthesize(reply, fishVoiceId, output);
+    }
+    return speech!.synthesize(reply, output, voiceId: selectedVoice);
+  }
+
+  Future<void> endVoiceCall() async {
+    callEpoch++;
+    callActive = false;
+    cancelled = true;
+    final service = speech;
+    if (service != null) {
+      if (service.recording) {
+        try {
+          await service.stopRecording();
+        } catch (_) {}
+      }
+      await service.stopSpeaking();
+    }
+    if (mounted) setState(() => status = 'Call ended.');
+  }
+
+  Future<void> runVoiceCall(int epoch) async {
+    final service = speech;
+    if (service == null || dataDir == null) return;
+    final recordings = Directory(
+      '${dataDir!.path}${Platform.pathSeparator}recordings',
+    );
+    await recordings.create(recursive: true);
+    while (mounted && callActive && epoch == callEpoch) {
+      if (callMuted) {
+        callStatus.value = 'Microphone muted';
+        await Future.delayed(const Duration(milliseconds: 200));
+        continue;
+      }
+      try {
+        callStatus.value = 'Listening…';
+        final path =
+            '${recordings.path}${Platform.pathSeparator}call_${DateTime.now().microsecondsSinceEpoch}.wav';
+        await service.startRecording(path);
+        final started = DateTime.now();
+        DateTime? lastVoice;
+        var voiceHits = 0;
+        while (callActive && epoch == callEpoch && !callMuted) {
+          await Future.delayed(const Duration(milliseconds: 200));
+          final level = await service.microphoneLevel();
+          if (level > -37) {
+            voiceHits++;
+            lastVoice = DateTime.now();
+          }
+          final elapsed = DateTime.now().difference(started);
+          if (callSendNow ||
+              elapsed > const Duration(seconds: 30) ||
+              (voiceHits >= 2 &&
+                  lastVoice != null &&
+                  DateTime.now().difference(lastVoice) >
+                      const Duration(milliseconds: 1200)) ||
+              (voiceHits == 0 && elapsed > const Duration(seconds: 9)))
+            break;
+        }
+        callSendNow = false;
+        if (!callActive || epoch != callEpoch || callMuted || voiceHits < 2) {
+          if (service.recording) await service.stopRecording();
+          continue;
+        }
+        callStatus.value = 'Transcribing on this device…';
+        final transcript = await service.stopAndTranscribe();
+        if (transcript.trim().isEmpty || !callActive || epoch != callEpoch)
+          continue;
+        draft.text = transcript.trim();
+        callStatus.value = 'You: ${transcript.trim()}';
+        final before = chat.entries.length;
+        await send();
+        if (!callActive || epoch != callEpoch || chat.entries.length <= before)
+          continue;
+        final answer = chat.entries.last;
+        if (answer.role != 'assistant' ||
+            answer.text.isEmpty ||
+            answer.text.startsWith('['))
+          continue;
+        callStatus.value = voiceSource == 'Fish Audio'
+            ? 'Preparing Fish Audio voice…'
+            : 'Preparing ${SpeechService.voices.firstWhere((item) => item.id == selectedVoice).name}…';
+        final wav = await synthesizeReply(answer.text);
+        if (!callActive || epoch != callEpoch) {
+          final file = File(wav);
+          if (await file.exists()) await file.delete();
+          continue;
+        }
+        callStatus.value = 'Speaking…';
+        await service.playFile(wav);
+      } catch (error) {
+        if (service.recording) {
+          try {
+            await service.stopRecording();
+          } catch (_) {}
+        }
+        if (!callActive || epoch != callEpoch) break;
+        callStatus.value = 'Call error: $error';
+        await Future.delayed(const Duration(seconds: 2));
+      }
+    }
+  }
+
+  Future<void> showVoiceCall() async {
+    final service = speech;
+    if (service == null || dataDir == null || busy || voiceRecording) return;
+    if (!await service.modelsReady) {
+      showProblem('Download the five offline voices in Settings first.');
+      return;
+    }
+    if (selectedModel == null) {
+      showProblem('Choose a local chat model before calling.');
+      return;
+    }
+    if (voiceSource == 'Fish Audio' &&
+        (!await FishVoice.hasKey || fishVoiceId.trim().isEmpty)) {
+      showProblem('Add a Fish Audio key and voice ID in Voice settings first.');
+      return;
+    }
+    callEpoch++;
+    final epoch = callEpoch;
+    callMuted = false;
+    callActive = true;
+    callStatus.value = 'Starting local call…';
+    unawaited(runVoiceCall(epoch));
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, update) => Dialog(
+          backgroundColor: Colors.transparent,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 460),
+            child: GlassSurface(
+              padding: const EdgeInsets.all(25),
+              radius: 30,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Local voice call',
+                    style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 20),
+                  Container(
+                    width: 118,
+                    height: 118,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: RadialGradient(
+                        colors: [
+                          GlassPalette.resolve(themeName, customColor).accent,
+                          Colors.transparent,
+                        ],
+                      ),
+                    ),
+                    child: const Icon(Icons.graphic_eq, size: 58),
+                  ),
+                  const SizedBox(height: 18),
+                  ValueListenableBuilder<String>(
+                    valueListenable: callStatus,
+                    builder: (context, value, _) =>
+                        Text(value, textAlign: TextAlign.center),
+                  ),
+                  const SizedBox(height: 18),
+                  if (voiceSource == 'Offline')
+                    DropdownButton<int>(
+                      value: selectedVoice,
+                      items: SpeechService.voices
+                          .map(
+                            (item) => DropdownMenuItem(
+                              value: item.id,
+                              child: Text('${item.name} · ${item.gender}'),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value == null) return;
+                        update(() => selectedVoice = value);
+                        unawaited(save());
+                      },
+                    ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 12,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: () => update(() => callMuted = !callMuted),
+                        icon: Icon(callMuted ? Icons.mic_off : Icons.mic),
+                        label: Text(callMuted ? 'Unmute' : 'Mute'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => callSendNow = true,
+                        icon: const Icon(Icons.send),
+                        label: const Text('Send now'),
+                      ),
+                      FilledButton.icon(
+                        onPressed: () => Navigator.pop(dialogContext),
+                        icon: const Icon(Icons.call_end),
+                        label: const Text('End call'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await endVoiceCall();
+  }
+
   Future<void> showModels() async {
     await showModalBottomSheet<void>(
       context: context,
@@ -1179,7 +1700,7 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: SizedBox(
-              height: 410,
+              height: MediaQuery.sizeOf(context).height * 0.78,
               child: Column(
                 children: [
                   Text(
@@ -1240,6 +1761,16 @@ class _ChatScreenState extends State<ChatScreen> {
                               },
                         icon: const Icon(Icons.visibility_outlined),
                         label: const Text('Get detailed vision model · 3 GB'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: downloading
+                            ? null
+                            : () async {
+                                await downloadRoleplayModel();
+                                update(() {});
+                              },
+                        icon: const Icon(Icons.theater_comedy_outlined),
+                        label: const Text('Get adult roleplay model · 2.5 GB'),
                       ),
                       if (downloading)
                         TextButton(
@@ -1341,6 +1872,11 @@ class _ChatScreenState extends State<ChatScreen> {
     var animated = motion;
     var speed = motionSpeed;
     var spokenReplies = autoSpeak;
+    var voice = selectedVoice;
+    var source = voiceSource;
+    final fishIdController = TextEditingController(text: fishVoiceId);
+    final fishKeyController = TextEditingController();
+    var keySaved = fishHasKey;
     await showDialog<void>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -1526,6 +2062,41 @@ class _ChatScreenState extends State<ChatScreen> {
                   ExpansionTile(
                     title: const Text('Voice'),
                     children: [
+                      DropdownButtonFormField<String>(
+                        initialValue: source,
+                        decoration: const InputDecoration(
+                          labelText: 'Voice source',
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'Offline',
+                            child: Text('Offline voices · private'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Fish Audio',
+                            child: Text('Fish Audio · online'),
+                          ),
+                        ],
+                        onChanged: (value) =>
+                            update(() => source = value ?? source),
+                      ),
+                      if (source == 'Offline')
+                        DropdownButtonFormField<int>(
+                          initialValue: voice,
+                          decoration: const InputDecoration(
+                            labelText: 'Offline voice',
+                          ),
+                          items: SpeechService.voices
+                              .map(
+                                (item) => DropdownMenuItem(
+                                  value: item.id,
+                                  child: Text('${item.name} · ${item.gender}'),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (value) =>
+                              update(() => voice = value ?? voice),
+                        ),
                       TextField(
                         controller: speechController,
                         decoration: const InputDecoration(
@@ -1558,8 +2129,55 @@ class _ChatScreenState extends State<ChatScreen> {
                                 unawaited(downloadSpeechModels());
                               },
                         icon: const Icon(Icons.download),
-                        label: const Text('Download offline voice models'),
+                        label: const Text('Download 5 offline voices · 305 MB'),
                       ),
+                      if (source == 'Fish Audio') ...[
+                        const Text(
+                          'Optional online voice: reply text is sent to Fish Audio for speech. Chat and transcription stay on this device.',
+                        ),
+                        TextButton.icon(
+                          onPressed: () => launchUrl(
+                            Uri.parse('https://fish.audio/app/api-keys/'),
+                            mode: LaunchMode.externalApplication,
+                          ),
+                          icon: const Icon(Icons.open_in_new),
+                          label: const Text('Open Fish Audio API keys'),
+                        ),
+                        TextButton.icon(
+                          onPressed: () => launchUrl(
+                            Uri.parse('https://fish.audio/discovery/'),
+                            mode: LaunchMode.externalApplication,
+                          ),
+                          icon: const Icon(Icons.record_voice_over),
+                          label: const Text('Browse or create Fish voices'),
+                        ),
+                        TextField(
+                          controller: fishIdController,
+                          decoration: const InputDecoration(
+                            labelText: 'Fish voice link or ID',
+                            helperText:
+                                'Paste a Fish voice page link or model ID',
+                          ),
+                        ),
+                        TextField(
+                          controller: fishKeyController,
+                          obscureText: true,
+                          decoration: InputDecoration(
+                            labelText: keySaved
+                                ? 'Replace saved API key'
+                                : 'Fish Audio API key',
+                          ),
+                        ),
+                        if (keySaved)
+                          TextButton(
+                            onPressed: () async {
+                              await FishVoice.saveKey('');
+                              update(() => keySaved = false);
+                              fishHasKey = false;
+                            },
+                            child: const Text('Remove saved key'),
+                          ),
+                      ],
                       SwitchListTile(
                         title: const Text('Speak voice replies'),
                         value: spokenReplies,
@@ -1578,7 +2196,19 @@ class _ChatScreenState extends State<ChatScreen> {
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: () {
+              onPressed: () async {
+                if (fishKeyController.text.trim().isNotEmpty) {
+                  try {
+                    await FishVoice.saveKey(fishKeyController.text);
+                    fishHasKey = true;
+                  } catch (error) {
+                    if (mounted)
+                      showProblem(
+                        'Could not save Fish Audio key securely: $error',
+                      );
+                    return;
+                  }
+                }
                 instructions = promptController.text;
                 frameCount = count;
                 maxTokens = limit;
@@ -1590,6 +2220,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   motionSpeed = speed;
                   speechRoot = speechController.text.trim();
                   autoSpeak = spokenReplies;
+                  selectedVoice = voice;
+                  voiceSource = source;
+                  fishVoiceId = FishVoice.voiceIdFromInput(
+                    fishIdController.text,
+                  );
                   if (speechRoot != null && speechRoot!.isNotEmpty) {
                     final previous = speech;
                     speech = SpeechService(speechRoot!);
@@ -1608,6 +2243,8 @@ class _ChatScreenState extends State<ChatScreen> {
     promptController.dispose();
     speechController.dispose();
     colorController.dispose();
+    fishIdController.dispose();
+    fishKeyController.dispose();
   }
 
   Widget messageBubble(ChatEntry entry) => Align(
@@ -1642,6 +2279,24 @@ class _ChatScreenState extends State<ChatScreen> {
                     fontWeight: FontWeight.w800,
                     letterSpacing: 0.6,
                   ),
+                ),
+                const SizedBox(width: 12),
+                PopupMenuButton<String>(
+                  tooltip: 'Message actions',
+                  icon: const Icon(Icons.more_horiz, size: 18),
+                  padding: EdgeInsets.zero,
+                  onSelected: (value) {
+                    if (value == 'delete') unawaited(deleteMessage(entry));
+                    if (value == 'copy')
+                      Clipboard.setData(ClipboardData(text: entry.text));
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(value: 'copy', child: Text('Copy text')),
+                    PopupMenuItem(
+                      value: 'delete',
+                      child: Text('Delete message'),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -1704,6 +2359,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 actions: [
                   IconButton(
+                    tooltip: 'Conversation personality and memory',
+                    onPressed: chats.isEmpty ? null : showChatOptions,
+                    icon: const Icon(Icons.tune),
+                  ),
+                  IconButton(
                     tooltip: 'Models',
                     onPressed: showModels,
                     icon: const Icon(Icons.memory),
@@ -1735,12 +2395,30 @@ class _ChatScreenState extends State<ChatScreen> {
                               .map(
                                 (item) => ListTile(
                                   title: Text(item.title),
+                                  subtitle: item.personality == 'Default'
+                                      ? null
+                                      : Text(item.personality),
                                   selected: item.id == chatId,
-                                  onTap: () {
-                                    setState(() => chatId = item.id);
-                                    Navigator.pop(context);
-                                    unawaited(save());
-                                  },
+                                  trailing: PopupMenuButton<String>(
+                                    tooltip: 'Conversation actions',
+                                    onSelected: (value) {
+                                      if (value == 'delete')
+                                        unawaited(deleteConversation(item));
+                                    },
+                                    itemBuilder: (context) => const [
+                                      PopupMenuItem(
+                                        value: 'delete',
+                                        child: Text('Delete conversation'),
+                                      ),
+                                    ],
+                                  ),
+                                  onTap: busy || callActive
+                                      ? null
+                                      : () {
+                                          setState(() => chatId = item.id);
+                                          Navigator.pop(context);
+                                          unawaited(save());
+                                        },
                                 ),
                               )
                               .toList(),
@@ -1931,6 +2609,13 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             ),
                             const SizedBox(width: 6),
+                            IconButton(
+                              tooltip: 'Call the AI',
+                              onPressed: callActive || busy
+                                  ? null
+                                  : showVoiceCall,
+                              icon: const Icon(Icons.call_outlined),
+                            ),
                             IconButton(
                               tooltip: voiceRecording
                                   ? 'Stop and transcribe'

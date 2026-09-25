@@ -55,11 +55,16 @@ jobs:
           xcrun simctl bootstatus "$simulator" -b
           flutter build ios --simulator --no-pub
           xcrun simctl install "$simulator" build/ios/iphonesimulator/Runner.app
+          container=$(xcrun simctl get_app_container "$simulator" com.localai.localAiChat data)
+          mkdir -p "$container/Library/Application Support"
+          xcrun simctl launch "$simulator" com.localai.localAiChat --self-test-keychain "$container/Library/Application Support/keychain-test.json"
+          sleep 3
+          cat "$container/Library/Application Support/keychain-test.json"
+          grep -q '"ok":true' "$container/Library/Application Support/keychain-test.json"
           xcrun simctl launch "$simulator" com.localai.localAiChat
           sleep 5
           xcrun simctl io "$simulator" screenshot iphone-preview.png
           xcrun simctl terminate "$simulator" com.localai.localAiChat
-          container=$(xcrun simctl get_app_container "$simulator" com.localai.localAiChat data)
           mkdir -p "$container/Library/Application Support"
           printf '%s' '{"themeName":"Chat Dark","backgroundStyle":"Quiet","motion":false,"chats":[{"id":"preview","title":"UI preview","entries":[{"role":"user","text":"Example message","frames":[]},{"role":"assistant","text":"Example reply","frames":[]}]}],"chatId":"preview"}' > "$container/Library/Application Support/local_chat.json"
           xcrun simctl launch "$simulator" com.localai.localAiChat

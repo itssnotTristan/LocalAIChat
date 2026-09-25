@@ -6,10 +6,158 @@ import 'dart:ui' as ui;
 import 'package:flutter_video_thumbnail_plus/flutter_video_thumbnail_plus.dart';
 import 'package:lib_llama_cpp/lib_llama_cpp.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'speech_service.dart';
+import 'chat_context.dart';
+import 'reply_quality.dart';
 import 'video_duration.dart';
 import 'video_sampler.dart';
+
+Future<void> runKeychainSelfTest(List<String> args) async {
+  const storage = FlutterSecureStorage();
+  const key = 'local_ai_chat_keychain_probe';
+  final report = File(args.length > 1
+      ? args[1]
+      : '${(await getApplicationSupportDirectory()).path}/keychain-test.json');
+  await report.parent.create(recursive: true);
+  try {
+    await storage.write(key: key, value: 'probe');
+    final value = await storage.read(key: key);
+    await storage.delete(key: key);
+    final deleted = await storage.read(key: key);
+    await report.writeAsString(
+      jsonEncode({'ok': value == 'probe' && deleted == null}),
+    );
+  } catch (error) {
+    await report.writeAsString(
+      jsonEncode({'ok': false, 'error': error.toString()}),
+    );
+    exit(2);
+  }
+}
+
+Future<void> runPersonalitySelfTest(List<String> args) async {
+  final report = File(
+    args.length > 1 ? args[1] : 'D:/LocalAIChat/self-test-personality.json',
+  );
+  final modelPath = args.length > 2
+      ? args[2]
+      : 'D:/LocalAIChat/models/qwen3-4b-nymphaea-rp/Qwen3-4B-Nymphaea-RP.Q4_K_M.gguf';
+  await report.parent.create(recursive: true);
+  final output = <String, dynamic>{'model': modelPath};
+  final client = LlamaOpenAIClient(
+    models: {
+      'test': LlamaModelConfig(
+        modelPath: modelPath,
+        contextSize: 3072,
+        gpuLayerCount: 0,
+      ),
+    },
+  );
+  Future<void> ask(
+    String label,
+    String personality,
+    String memory,
+    String question,
+  ) async {
+    final raw = StringBuffer();
+    await for (final event in client.responses.stream(
+      model: 'test',
+      input: [
+        LlamaResponseInputItem(
+          role: 'user',
+          content: [LlamaTextPart(question)],
+        ),
+      ],
+      instructions: ChatContext.instructions(
+        global: 'You are a private local assistant. /no_think',
+        personality: personality,
+        customPersonality: '',
+        memory: memory,
+      ),
+      maxOutputTokens: 120,
+      temperature: 0.65,
+      topP: 0.9,
+    )) {
+      if (event is LlamaResponseOutputTextDelta) raw.write(event.delta);
+      if (event is LlamaResponseFailed) throw StateError(event.error.message);
+    }
+    output[label] = visibleReply(raw.toString());
+    await report.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(output),
+    );
+  }
+
+  try {
+    await ask(
+      'memory',
+      'Default',
+      'The user’s favorite color is green.',
+      'What is my favorite color?',
+    );
+    await ask(
+      'jerk',
+      'Jerk',
+      '',
+      'Hi. I lost my keys again. What do you think?',
+    );
+    await ask('flirty', 'Horny', '', 'Hi. Flirt with me.');
+    output['ok'] = (output['memory'] as String).toLowerCase().contains('green');
+  } catch (error) {
+    output['ok'] = false;
+    output['error'] = error.toString();
+  }
+  await report.writeAsString(
+    const JsonEncoder.withIndent('  ').convert(output),
+  );
+  if (output['ok'] != true) exit(2);
+}
+
+Future<void> runVoiceSelfTest(List<String> args) async {
+  final root = args.length > 1 ? args[1] : 'D:/LocalAIChat/speech';
+  final reportPath = args.length > 2
+      ? args[2]
+      : 'D:/LocalAIChat/self-test-voices.json';
+  final report = File(reportPath);
+  await report.parent.create(recursive: true);
+  final service = SpeechService(root);
+  final output = <String, dynamic>{'root': root, 'voices': <String, dynamic>{}};
+  try {
+    if (!await service.modelsReady)
+      throw StateError('Offline speech files are incomplete.');
+    for (final voice in SpeechService.voices) {
+      final path = '${report.parent.path}/voice_${voice.id}.wav';
+      await service.synthesize(
+        'Hello, this is a local voice test.',
+        path,
+        voiceId: voice.id,
+      );
+      final file = File(path);
+      final digest = await sha256.bind(file.openRead()).first;
+      (output['voices'] as Map<String, dynamic>)[voice.name] = {
+        'gender': voice.gender,
+        'bytes': await file.length(),
+        'sha256': digest.toString(),
+        'file': path,
+      };
+      await report.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(output),
+      );
+    }
+    output['ok'] = true;
+  } catch (error) {
+    output['ok'] = false;
+    output['error'] = error.toString();
+  } finally {
+    await service.dispose();
+    await report.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(output),
+    );
+  }
+  if (output['ok'] != true) exit(2);
+}
 
 Future<void> runVisionProbe(List<String> args) async {
   if (args.length < 5) throw ArgumentError('Missing vision probe arguments.');

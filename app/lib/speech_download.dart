@@ -15,11 +15,11 @@ class SpeechDownloader {
   static const _asrUrl =
       'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-int8.tar.bz2';
   static const _ttsUrl =
-      'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-ljs.tar.bz2';
+      'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2';
   static const _asrSha =
       'd5fe6ec4334fef36255b2a4010412cad4c007e33103fec62fb5d17cad88086f2';
   static const _ttsSha =
-      '78f7df445fcd42d1dd6df2c78c66c2c2fee8b7abecc6ae255a5950097a6558bc';
+      '912804855a04745fa77a30be545b3f9a5d15c4d66db00b88cbcd4921df605ac7';
 
   void cancel() {
     _cancelled = true;
@@ -45,7 +45,7 @@ class SpeechDownloader {
       );
       final tts = await _file(
         directory,
-        'vits-ljs.tar.bz2',
+        'kokoro-en-v0_19.tar.bz2',
         _ttsUrl,
         _ttsSha,
         progress,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 
@@ -12,29 +13,38 @@ class SpeechService {
   final AudioPlayer player = AudioPlayer();
   bool recording = false;
   bool speaking = false;
+  Completer<void>? _playStopped;
+
+  static const voices = <({String name, String gender, int id})>[
+    (name: 'Adam', gender: 'Male', id: 5),
+    (name: 'Michael', gender: 'Male', id: 6),
+    (name: 'George', gender: 'Male', id: 9),
+    (name: 'Bella', gender: 'Female', id: 1),
+    (name: 'Emma', gender: 'Female', id: 7),
+  ];
 
   String get asrDir => '$root/sherpa-onnx-moonshine-tiny-en-int8';
-  String get ttsDir => '$root/vits-ljs';
+  String get ttsDir => '$root/kokoro-en-v0_19';
 
   Future<bool> get modelsReady => hasModels(root);
 
   static Future<bool> hasModels(String root) async {
     final asrDir = '$root/sherpa-onnx-moonshine-tiny-en-int8';
-    final ttsDir = '$root/vits-ljs';
+    final ttsDir = '$root/kokoro-en-v0_19';
     final files = [
       '$asrDir/preprocess.onnx',
       '$asrDir/encode.int8.onnx',
       '$asrDir/uncached_decode.int8.onnx',
       '$asrDir/cached_decode.int8.onnx',
       '$asrDir/tokens.txt',
-      '$ttsDir/vits-ljs.onnx',
+      '$ttsDir/model.onnx',
+      '$ttsDir/voices.bin',
       '$ttsDir/tokens.txt',
-      '$ttsDir/lexicon.txt',
     ];
     for (final path in files) {
       if (!await File(path).exists()) return false;
     }
-    return true;
+    return Directory('$ttsDir/espeak-ng-data').exists();
   }
 
   Future<void> startRecording(String outputPath) async {
@@ -61,7 +71,24 @@ class SpeechService {
       throw StateError('No microphone recording was saved.');
     }
     final rootPath = root;
-    return Isolate.run(() => _transcribe(rootPath, path));
+    try {
+      return await Isolate.run(() => _transcribe(rootPath, path));
+    } finally {
+      final recording = File(path);
+      if (await recording.exists()) await recording.delete();
+    }
+  }
+
+  Future<double> microphoneLevel() async =>
+      (await recorder.getAmplitude()).current;
+
+  Future<void> stopRecording() async {
+    final path = await recorder.stop();
+    recording = false;
+    if (path != null) {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    }
   }
 
   Future<String> transcribeFile(String wavPath) {
@@ -103,21 +130,27 @@ class SpeechService {
     }
   }
 
-  Future<String> synthesize(String text, String outputPath) {
+  Future<String> synthesize(String text, String outputPath, {int voiceId = 5}) {
     final rootPath = root;
-    return Isolate.run(() => _synthesize(rootPath, text, outputPath));
+    return Isolate.run(() => _synthesize(rootPath, text, outputPath, voiceId));
   }
 
-  static String _synthesize(String root, String text, String outputPath) {
+  static String _synthesize(
+    String root,
+    String text,
+    String outputPath,
+    int voiceId,
+  ) {
     sherpa.initBindings();
-    final folder = '$root/vits-ljs';
+    final folder = '$root/kokoro-en-v0_19';
     final tts = sherpa.OfflineTts(
       sherpa.OfflineTtsConfig(
         model: sherpa.OfflineTtsModelConfig(
-          vits: sherpa.OfflineTtsVitsModelConfig(
-            model: '$folder/vits-ljs.onnx',
+          kokoro: sherpa.OfflineTtsKokoroModelConfig(
+            model: '$folder/model.onnx',
+            voices: '$folder/voices.bin',
             tokens: '$folder/tokens.txt',
-            lexicon: '$folder/lexicon.txt',
+            dataDir: '$folder/espeak-ng-data',
           ),
           numThreads: 2,
           debug: false,
@@ -125,7 +158,7 @@ class SpeechService {
       ),
     );
     try {
-      final audio = tts.generate(text: text, sid: 0, speed: 1.0);
+      final audio = tts.generate(text: text, sid: voiceId, speed: 1.0);
       if (audio.samples.isEmpty || audio.sampleRate <= 0) {
         throw StateError('Local speech synthesis produced no audio.');
       }
@@ -143,16 +176,29 @@ class SpeechService {
 
   Future<void> playFile(String path) async {
     await player.stop();
+    _playStopped = Completer<void>();
     speaking = true;
     try {
       await player.play(DeviceFileSource(path));
-      await player.onPlayerComplete.first;
+      await Future.any([player.onPlayerComplete.first, _playStopped!.future]);
     } finally {
       speaking = false;
+      _playStopped = null;
+      await player.stop();
+      final file = File(path);
+      if (await file.exists()) {
+        try {
+          await file.delete();
+        } on FileSystemException {
+          // A platform decoder may release the file handle shortly afterward.
+        }
+      }
     }
   }
 
   Future<void> stopSpeaking() async {
+    if (_playStopped != null && !_playStopped!.isCompleted)
+      _playStopped!.complete();
     await player.stop();
     speaking = false;
   }
