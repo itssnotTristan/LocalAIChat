@@ -22,10 +22,10 @@ class ModelDownloader {
   static const projectorSha256 =
       '921dc7e259f308e5b027111fa185efcbf33db13f6e35749ddf7f5cdb60ef520b';
   static const adultTextUrl =
-      'https://huggingface.co/mradermacher/Huihui-Qwen3-1.7B-abliterated-v2-GGUF/resolve/main/';
-  static const adultTextName = 'Huihui-Qwen3-1.7B-abliterated-v2.Q4_K_M.gguf';
+      'https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-abliterated-GGUF/resolve/main/';
+  static const adultTextName = 'Qwen2.5-1.5B-Instruct-abliterated.Q4_K_M.gguf';
   static const adultTextSha256 =
-      '7adf2422ea65686ad6a5c604d109d6886207e181b012392b400be44bcb0e5f8b';
+      '59aa9f44bde5349dbe292d7024d197db605f422b8baf65f3246a59abbde4e8e9';
 
   void cancel() {
     _cancelled = true;

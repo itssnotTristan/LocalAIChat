@@ -273,6 +273,35 @@ final class NativeLlamaRuntime {
     );
     final stopMatcher = _StopMatcher(command.stop);
     var generated = 0;
+    final pendingUtf8 = <int>[];
+
+    String decodeTokenPiece(List<int> bytes) {
+      pendingUtf8.addAll(bytes);
+      // A Unicode character may span several model tokens. Decode only
+      // complete byte sequences, retaining an incomplete suffix.
+      var end = 0;
+      while (end < pendingUtf8.length) {
+        final lead = pendingUtf8[end];
+        final width = lead < 0x80
+            ? 1
+            : lead >= 0xC2 && lead <= 0xDF
+            ? 2
+            : lead >= 0xE0 && lead <= 0xEF
+            ? 3
+            : lead >= 0xF0 && lead <= 0xF4
+            ? 4
+            : 1;
+        if (end + width > pendingUtf8.length) break;
+        end += width;
+      }
+      if (end == 0) return '';
+      final text = utf8.decode(
+        pendingUtf8.sublist(0, end),
+        allowMalformed: true,
+      );
+      pendingUtf8.removeRange(0, end);
+      return text;
+    }
 
     try {
       while (generated < maxTokens) {
@@ -286,7 +315,7 @@ final class NativeLlamaRuntime {
         }
 
         _bindings.llama_sampler_accept(sampler, token);
-        final piece = _tokenToPiece(loaded.vocab, token);
+        final piece = decodeTokenPiece(_tokenToBytes(loaded.vocab, token));
         final delta = stopMatcher.add(piece);
         if (delta.isNotEmpty) {
           yield LlamaTokenResponse(text: delta, index: generated);
@@ -308,6 +337,14 @@ final class NativeLlamaRuntime {
         _decodeTokens(loaded.context, [token]);
       }
 
+      if (pendingUtf8.isNotEmpty) {
+        final delta = stopMatcher.add(
+          utf8.decode(pendingUtf8, allowMalformed: true),
+        );
+        if (delta.isNotEmpty) {
+          yield LlamaTokenResponse(text: delta, index: generated);
+        }
+      }
       final tail = stopMatcher.flush();
       if (tail.isNotEmpty) {
         yield LlamaTokenResponse(text: tail, index: generated);
@@ -389,6 +426,8 @@ final class NativeLlamaRuntime {
       'parallel_tool_calls': command.parallelToolCalls,
       'add_generation_prompt': true,
       'use_jinja': true,
+      'enable_thinking': false,
+      'chat_template_kwargs': {'enable_thinking': false},
     };
   }
 
@@ -737,7 +776,7 @@ final class NativeLlamaRuntime {
     return pointer;
   }
 
-  String _tokenToPiece(Pointer<llama_vocab> vocab, int token) {
+  List<int> _tokenToBytes(Pointer<llama_vocab> vocab, int token) {
     var capacity = 32;
     Pointer<Char> buffer = calloc<Char>(capacity);
 
@@ -770,7 +809,7 @@ final class NativeLlamaRuntime {
         );
       }
 
-      return buffer.cast<Utf8>().toDartString(length: length);
+      return List<int>.from(buffer.cast<Uint8>().asTypedList(length));
     } finally {
       calloc.free(buffer);
     }
@@ -1421,56 +1460,58 @@ final class _LibLlamaCppWrapper {
 typedef _StringFreeNative = Void Function(Pointer<Char>);
 typedef _StringFreeDart = void Function(Pointer<Char>);
 
-typedef _ChatTemplatesInitNative = Pointer<Void> Function(
-  Pointer<llama_model>,
-  Pointer<Char>,
-  Pointer<Char>,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
-typedef _ChatTemplatesInitDart = Pointer<Void> Function(
-  Pointer<llama_model>,
-  Pointer<Char>,
-  Pointer<Char>,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
+typedef _ChatTemplatesInitNative =
+    Pointer<Void> Function(
+      Pointer<llama_model>,
+      Pointer<Char>,
+      Pointer<Char>,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
+typedef _ChatTemplatesInitDart =
+    Pointer<Void> Function(
+      Pointer<llama_model>,
+      Pointer<Char>,
+      Pointer<Char>,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
 
 typedef _ChatTemplatesFreeNative = Void Function(Pointer<Void>);
 typedef _ChatTemplatesFreeDart = void Function(Pointer<Void>);
 
-typedef _ChatTemplatesApplyJsonNative = Pointer<Char> Function(
-  Pointer<Void>,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
-typedef _ChatTemplatesApplyJsonDart = Pointer<Char> Function(
-  Pointer<Void>,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
+typedef _ChatTemplatesApplyJsonNative =
+    Pointer<Char> Function(
+      Pointer<Void>,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
+typedef _ChatTemplatesApplyJsonDart =
+    Pointer<Char> Function(
+      Pointer<Void>,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
 
-typedef _ChatParseJsonNative = Pointer<Char> Function(
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
-typedef _ChatParseJsonDart = Pointer<Char> Function(
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
+typedef _ChatParseJsonNative =
+    Pointer<Char> Function(Pointer<Char>, Pointer<Pointer<Char>>);
+typedef _ChatParseJsonDart =
+    Pointer<Char> Function(Pointer<Char>, Pointer<Pointer<Char>>);
 
-typedef _MediaInitNative = Pointer<Void> Function(
-  Pointer<Char>,
-  Pointer<llama_model>,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
-typedef _MediaInitDart = Pointer<Void> Function(
-  Pointer<Char>,
-  Pointer<llama_model>,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
+typedef _MediaInitNative =
+    Pointer<Void> Function(
+      Pointer<Char>,
+      Pointer<llama_model>,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
+typedef _MediaInitDart =
+    Pointer<Void> Function(
+      Pointer<Char>,
+      Pointer<llama_model>,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
 
 typedef _MediaFreeNative = Void Function(Pointer<Void>);
 typedef _MediaFreeDart = void Function(Pointer<Void>);
@@ -1478,64 +1519,70 @@ typedef _MediaFreeDart = void Function(Pointer<Void>);
 typedef _MediaSupportsNative = Bool Function(Pointer<Void>);
 typedef _MediaSupportsDart = bool Function(Pointer<Void>);
 
-typedef _MediaBlobFromFileNative = Pointer<Void> Function(
-  Pointer<Void>,
-  Pointer<Char>,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
-typedef _MediaBlobFromFileDart = Pointer<Void> Function(
-  Pointer<Void>,
-  Pointer<Char>,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
+typedef _MediaBlobFromFileNative =
+    Pointer<Void> Function(
+      Pointer<Void>,
+      Pointer<Char>,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
+typedef _MediaBlobFromFileDart =
+    Pointer<Void> Function(
+      Pointer<Void>,
+      Pointer<Char>,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
 
-typedef _MediaBlobFromBytesNative = Pointer<Void> Function(
-  Pointer<Void>,
-  Pointer<Uint8>,
-  Size,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
-typedef _MediaBlobFromBytesDart = Pointer<Void> Function(
-  Pointer<Void>,
-  Pointer<Uint8>,
-  int,
-  Pointer<Char>,
-  Pointer<Pointer<Char>>,
-);
+typedef _MediaBlobFromBytesNative =
+    Pointer<Void> Function(
+      Pointer<Void>,
+      Pointer<Uint8>,
+      Size,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
+typedef _MediaBlobFromBytesDart =
+    Pointer<Void> Function(
+      Pointer<Void>,
+      Pointer<Uint8>,
+      int,
+      Pointer<Char>,
+      Pointer<Pointer<Char>>,
+    );
 
 typedef _MediaBlobFreeNative = Void Function(Pointer<Void>);
 typedef _MediaBlobFreeDart = void Function(Pointer<Void>);
 
-typedef _MediaEvalPromptNative = Int32 Function(
-  Pointer<Void>,
-  Pointer<llama_context>,
-  Pointer<Char>,
-  Pointer<Pointer<Void>>,
-  Size,
-  Int32,
-  Int32,
-  Int32,
-  Bool,
-  Bool,
-  Bool,
-  Pointer<Int32>,
-  Pointer<Pointer<Char>>,
-);
-typedef _MediaEvalPromptDart = int Function(
-  Pointer<Void>,
-  Pointer<llama_context>,
-  Pointer<Char>,
-  Pointer<Pointer<Void>>,
-  int,
-  int,
-  int,
-  int,
-  bool,
-  bool,
-  bool,
-  Pointer<Int32>,
-  Pointer<Pointer<Char>>,
-);
+typedef _MediaEvalPromptNative =
+    Int32 Function(
+      Pointer<Void>,
+      Pointer<llama_context>,
+      Pointer<Char>,
+      Pointer<Pointer<Void>>,
+      Size,
+      Int32,
+      Int32,
+      Int32,
+      Bool,
+      Bool,
+      Bool,
+      Pointer<Int32>,
+      Pointer<Pointer<Char>>,
+    );
+typedef _MediaEvalPromptDart =
+    int Function(
+      Pointer<Void>,
+      Pointer<llama_context>,
+      Pointer<Char>,
+      Pointer<Pointer<Void>>,
+      int,
+      int,
+      int,
+      int,
+      bool,
+      bool,
+      bool,
+      Pointer<Int32>,
+      Pointer<Pointer<Char>>,
+    );

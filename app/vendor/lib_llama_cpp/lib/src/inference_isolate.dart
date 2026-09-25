@@ -206,10 +206,13 @@ void _runInferenceWorker(_StartMessage start) {
             }
           } on NativeLlamaException catch (error) {
             send(message.requestId, LlamaErrorResponse(message: error.message));
-          } on Object catch (error) {
+          } on Object catch (error, trace) {
             send(
               message.requestId,
-              LlamaErrorResponse(message: 'Generation failed: $error'),
+              LlamaErrorResponse(
+                message:
+                    'Generation failed: $error\n${trace.toString().split('\n').take(6).join('\n')}',
+              ),
             );
           }
         }
@@ -228,10 +231,13 @@ void _runInferenceWorker(_StartMessage start) {
             }
           } on NativeLlamaException catch (error) {
             send(message.requestId, LlamaErrorResponse(message: error.message));
-          } on Object catch (error) {
+          } on Object catch (error, trace) {
             send(
               message.requestId,
-              LlamaErrorResponse(message: 'Generation failed: $error'),
+              LlamaErrorResponse(
+                message:
+                    'Generation failed: $error\n${trace.toString().split('\n').take(6).join('\n')}',
+              ),
             );
           }
         }

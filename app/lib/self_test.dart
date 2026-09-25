@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter_video_thumbnail_plus/flutter_video_thumbnail_plus.dart';
 import 'package:lib_llama_cpp/lib_llama_cpp.dart';
@@ -8,6 +9,95 @@ import 'package:crypto/crypto.dart';
 
 import 'speech_service.dart';
 import 'video_duration.dart';
+import 'video_sampler.dart';
+
+Future<void> runTextSelfTest(List<String> args) async {
+  final report = File(
+    args.length > 1 ? args[1] : 'D:/LocalAIChat/self-test-text.json',
+  );
+  final modelPath = args.length > 2
+      ? args[2]
+      : 'D:/LocalAIChat/models/qwen25-1.5b-abliterated/Qwen2.5-1.5B-Instruct-abliterated.Q4_K_M.gguf';
+  await report.parent.create(recursive: true);
+  final client = LlamaOpenAIClient(
+    models: {
+      'text': LlamaModelConfig(
+        modelPath: modelPath,
+        contextSize: 4096,
+        gpuLayerCount: 0,
+      ),
+    },
+  );
+  Future<String> ask(List<LlamaResponseInputItem> input) async {
+    final answer = StringBuffer();
+    await for (final event in client.responses.stream(
+      model: 'text',
+      input: input,
+      instructions: 'You are a private local assistant. Answer the latest message directly and briefly. Accept the user correction as the most recent fact.',
+      maxOutputTokens: 160,
+    )) {
+      if (event is LlamaResponseOutputTextDelta) answer.write(event.delta);
+      if (event is LlamaResponseFailed) throw StateError(event.error.message);
+    }
+    return answer.toString().trim();
+  }
+
+  final output = <String, dynamic>{'model': modelPath};
+  Future<void> stage(String name, Future<String> Function() run) async {
+    try {
+      final answer = await run();
+      output[name] = answer;
+    } catch (error, trace) {
+      output['${name}Error'] = error.toString();
+      output['${name}Trace'] = trace.toString().split('\n').take(12).join('\n');
+    }
+    await report.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(output),
+    );
+  }
+
+  await stage('greeting', () async {
+    final answer = await ask([
+      LlamaResponseInputItem(
+        role: 'user',
+        content: [const LlamaTextPart('hi')],
+      ),
+    ]);
+    if (!RegExp(r'^(hi|hello|hey)\b', caseSensitive: false).hasMatch(answer) ||
+        answer.length > 80) {
+      throw StateError('Greeting did not answer directly: $answer');
+    }
+    return answer;
+  });
+  await stage('correction', () async {
+    final answer = await ask([
+      LlamaResponseInputItem(
+        role: 'user',
+        content: [const LlamaTextPart('The card is red.')],
+      ),
+      LlamaResponseInputItem(
+        role: 'assistant',
+        content: [const LlamaTextPart('The card is red.')],
+      ),
+      LlamaResponseInputItem(
+        role: 'user',
+        content: [
+          const LlamaTextPart(
+            'Correction: the card is green. What color is it?',
+          ),
+        ],
+      ),
+    ]);
+    if (!answer.toLowerCase().contains('green')) {
+      throw StateError('Correction was ignored: $answer');
+    }
+    return answer;
+  });
+  if (output.containsKey('greetingError') ||
+      output.containsKey('correctionError')) {
+    exit(2);
+  }
+}
 
 /// Runs the same packaged native plugins that the UI uses. Intended for
 /// repeatable Windows acceptance checks; this is not a mock inference test.
@@ -118,6 +208,15 @@ Future<void> runSelfTest(List<String> args) async {
     return text.toString().trim();
   }
 
+  await stage('greeting', () async {
+    final answer = await ask([const LlamaTextPart('hi')], maxTokens: 32);
+    if (!RegExp(r'^(hi|hello|hey)\b', caseSensitive: false).hasMatch(answer) ||
+        answer.length > 80) {
+      throw StateError('Unrelated or excessively long greeting: $answer');
+    }
+    return answer;
+  });
+
   await stage(
     'text',
     () => ask([const LlamaTextPart('What is two plus two?')]),
@@ -192,6 +291,52 @@ Future<void> runSelfTest(List<String> args) async {
     return {'durationMs': duration, 'frames': frames, 'answer': answer};
   }, timeout: const Duration(minutes: 8));
   await stopIfFailed('video');
+  final flashPath = args.length > 6
+      ? args[6]
+      : 'D:/LocalAIChat/fixtures/brief_blue_flash.mp4';
+  if (await File(flashPath).exists()) {
+    await stage('brief_video_change', () async {
+      final duration = (await VideoDuration.read(flashPath)).inMilliseconds;
+      final frames = await VideoSampler.sample(
+        video: flashPath,
+        durationMs: duration,
+        frameLimit: 8,
+        outputDir: Directory(
+          '${report.parent.path}${Platform.pathSeparator}sampled_flash',
+        ),
+      );
+      final times = frames.map((frame) => frame.timeMs).toList();
+      var blueSeen = false;
+      for (final frame in frames) {
+        final codec = await ui.instantiateImageCodec(
+          await File(frame.path).readAsBytes(),
+        );
+        try {
+          final image = (await codec.getNextFrame()).image;
+          try {
+            final pixels = await image.toByteData(
+              format: ui.ImageByteFormat.rawRgba,
+            );
+            if (pixels == null)
+              throw StateError('Could not inspect extracted frame.');
+            final offset =
+                ((image.height ~/ 2) * image.width + image.width ~/ 2) * 4;
+            final rgb = pixels.buffer.asUint8List(offset, 3);
+            if (rgb[2] > rgb[0] * 2 && rgb[2] > rgb[1] * 2) blueSeen = true;
+          } finally {
+            image.dispose();
+          }
+        } finally {
+          codec.dispose();
+        }
+      }
+      if (!blueSeen) {
+        throw StateError('Brief blue change was missed: $times');
+      }
+      return times;
+    }, timeout: const Duration(minutes: 8));
+    await stopIfFailed('brief_video_change');
+  }
   final speech = SpeechService('D:/LocalAIChat/speech');
   await stage('speech_recognition', () async {
     if (!await speech.modelsReady)

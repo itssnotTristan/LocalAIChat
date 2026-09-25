@@ -25,6 +25,9 @@ if (Test-Path -LiteralPath $Ffmpeg) {
   $video = Join-Path $OutputDirectory 'red_then_green.mp4'
   & $Ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=red:s=320x240:d=1:r=10' -f lavfi -i 'color=c=green:s=320x240:d=1:r=10' -filter_complex '[0:v][1:v]concat=n=2:v=1:a=0' -c:v libx264 -pix_fmt yuv420p $video
   if ($LASTEXITCODE -ne 0) { throw 'Could not create the two-color test video.' }
+  $flash = Join-Path $OutputDirectory 'brief_blue_flash.mp4'
+  & $Ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'color=c=red:s=320x240:d=1.5:r=24' -f lavfi -i 'color=c=blue:s=320x240:d=0.25:r=24' -f lavfi -i 'color=c=green:s=320x240:d=2.25:r=24' -filter_complex '[0:v][1:v][2:v]concat=n=3:v=1:a=0' -c:v libx264 -pix_fmt yuv420p $flash
+  if ($LASTEXITCODE -ne 0) { throw 'Could not create the brief-change test video.' }
 }
 
 Get-ChildItem -LiteralPath $OutputDirectory | Select-Object Name,Length

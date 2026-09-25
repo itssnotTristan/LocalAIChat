@@ -198,7 +198,10 @@ final class LlamaResponsesResource {
         tools: tools,
         toolChoice: toolChoice,
         parallelToolCalls: parallelToolCalls,
-        forceMessages: tools.isNotEmpty || _requiresMessageGeneration(messages),
+        // Chat models need their GGUF chat template even for text-only turns.
+        // The raw "system: ...\nuser: ..." fallback can make small models
+        // continue an unrelated example conversation.
+        forceMessages: true,
       ),
     );
 
@@ -300,8 +303,7 @@ final class LlamaResponsesResource {
           tools: tools,
           toolChoice: toolChoice,
           parallelToolCalls: parallelToolCalls,
-          forceMessages:
-              tools.isNotEmpty || _requiresMessageGeneration(messages),
+          forceMessages: true,
         ),
       );
 

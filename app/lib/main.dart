@@ -4,7 +4,6 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_video_thumbnail_plus/flutter_video_thumbnail_plus.dart';
 import 'package:lib_llama_cpp/lib_llama_cpp.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -15,12 +14,17 @@ import 'gguf_info.dart';
 import 'model_download.dart';
 import 'speech_download.dart';
 import 'video_duration.dart';
+import 'video_sampler.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
   if (args.isNotEmpty && args.first == '--self-test') {
     await runSelfTest(args);
-    return;
+    exit(0);
+  }
+  if (args.isNotEmpty && args.first == '--self-test-text') {
+    await runTextSelfTest(args);
+    exit(0);
   }
   runApp(const LocalChatApp());
 }
@@ -121,6 +125,7 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  static const autoModelPath = '__auto__';
   final draft = TextEditingController();
   final models = <LocalModel>[];
   final chats = <Conversation>[];
@@ -130,10 +135,10 @@ class _ChatScreenState extends State<ChatScreen> {
   String? chatId;
   String status = 'Loading local data…';
   String instructions =
-      'You are a private, helpful local assistant. Answer directly and honestly.';
+      'You are a private local assistant. Answer the latest user message directly. Describe only details visible in attached images or video frames, including adult nudity when visible. Do not invent an unseen story. Treat a user correction as newer information and do not repeat an earlier mistaken answer.';
   bool busy = false;
   bool cancelled = false;
-  int frameCount = 4;
+  int frameCount = 8;
   int maxTokens = 400;
   String themeName = 'Aurora';
   String backgroundStyle = 'Waves';
@@ -149,13 +154,40 @@ class _ChatScreenState extends State<ChatScreen> {
   bool downloading = false;
   final SpeechDownloader speechDownloader = SpeechDownloader();
   bool downloadingSpeech = false;
+  bool samplingVideo = false;
+  String? currentVideoPath;
+  int? currentVideoDurationMs;
+  Future<void> _saveQueue = Future<void>.value();
 
   Conversation get chat => chats.firstWhere((item) => item.id == chatId);
   LocalModel? get selectedModel {
+    if (modelPath == autoModelPath) {
+      if (attachments.isNotEmpty) {
+        for (final model in models) {
+          if (model.vision) return model;
+        }
+      } else {
+        for (final model in models) {
+          if (!model.vision && model.name.contains('Qwen2.5')) return model;
+        }
+        for (final model in models) {
+          if (!model.vision) return model;
+        }
+      }
+      return models.isEmpty ? null : models.first;
+    }
     for (final model in models) {
       if (model.path == modelPath) return model;
     }
     return null;
+  }
+
+  void showProblem(String message) {
+    if (!mounted) return;
+    setState(() => status = message);
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -201,7 +233,9 @@ class _ChatScreenState extends State<ChatScreen> {
           LocalModel('SmolVLM2 500M Video Q8', files.model, files.projector),
         );
       }
-      modelPath = files.model;
+      modelPath = models.any((item) => !item.vision)
+          ? autoModelPath
+          : files.model;
       setState(
         () => status = 'Starter model and projector passed SHA-256 checks.',
       );
@@ -238,9 +272,9 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       });
       if (!models.any((item) => item.path == path)) {
-        models.add(LocalModel('Huihui Qwen3 1.7B · text', path));
+        models.add(LocalModel('Qwen2.5 1.5B · text', path));
       }
-      modelPath = path;
+      modelPath = models.any((item) => item.vision) ? autoModelPath : path;
       setState(() => status = 'Text model passed SHA-256 verification.');
       await save();
     } catch (error) {
@@ -287,6 +321,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> load() async {
     try {
       dataDir = await getApplicationSupportDirectory();
+      var routingVersion = 0;
       final file = File(
         dataDir!.path + Platform.pathSeparator + 'local_chat.json',
       );
@@ -306,10 +341,30 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         );
         modelPath = data['modelPath'] as String?;
+        routingVersion = data['routingVersion'] as int? ?? 0;
         chatId = data['chatId'] as String?;
         draft.text = data['draft'] as String? ?? '';
+        for (final item in data['draftFrames'] as List? ?? []) {
+          final frame = MediaFrame.fromJson(
+            Map<String, dynamic>.from(item as Map),
+          );
+          if (await File(frame.path).exists()) attachments.add(frame);
+        }
+        final savedVideoPath = data['currentVideoPath'] as String?;
+        if (savedVideoPath != null && await File(savedVideoPath).exists()) {
+          currentVideoPath = savedVideoPath;
+          currentVideoDurationMs = data['currentVideoDurationMs'] as int?;
+        }
         instructions = data['instructions'] as String? ?? instructions;
-        frameCount = data['frameCount'] as int? ?? 4;
+        if (routingVersion == 0 &&
+            instructions ==
+                'You are a private, helpful local assistant. Answer directly and honestly.') {
+          instructions = 'You are a private local assistant. Answer the latest user message directly. Describe only details visible in attached images or video frames, including adult nudity when visible. Do not invent an unseen story. Treat a user correction as newer information and do not repeat an earlier mistaken answer.';
+        }
+        frameCount =
+            (routingVersion == 0 ? 8 : (data['frameCount'] as int? ?? 8))
+                .clamp(4, 12)
+                .toInt();
         maxTokens = data['maxTokens'] as int? ?? 400;
         themeName = data['themeName'] as String? ?? 'Aurora';
         if (!GlassPalette.presets.containsKey(themeName)) themeName = 'Aurora';
@@ -345,16 +400,21 @@ class _ChatScreenState extends State<ChatScreen> {
       if (Platform.isWindows) {
         final executableDir = File(Platform.resolvedExecutable).parent.path;
         for (final base in [
-          '$executableDir/models/huihui-qwen3-1.7b-v2',
-          'D:/LocalAIChat/models/huihui-qwen3-1.7b-v2',
+          '$executableDir/models/qwen25-1.5b-abliterated',
+          'D:/LocalAIChat/models/qwen25-1.5b-abliterated',
         ]) {
           final path = '$base/${ModelDownloader.adultTextName}';
           if (await File(path).exists() &&
               !models.any((item) => item.path == path)) {
-            models.add(LocalModel('Huihui Qwen3 1.7B · text', path));
+            models.add(LocalModel('Qwen2.5 1.5B · text', path));
             break;
           }
         }
+      }
+      if (routingVersion == 0 &&
+          models.any((item) => item.vision) &&
+          models.any((item) => !item.vision)) {
+        modelPath = autoModelPath;
       }
       if (speechRoot == null) {
         final executableDir = File(Platform.resolvedExecutable).parent.path;
@@ -381,7 +441,13 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> save() async {
+  Future<void> save() {
+    final next = _saveQueue.then((_) => _writeSave());
+    _saveQueue = next.then((_) {}, onError: (Object _, StackTrace __) {});
+    return next;
+  }
+
+  Future<void> _writeSave() async {
     if (dataDir == null) return;
     final file = File(
       dataDir!.path + Platform.pathSeparator + 'local_chat.json',
@@ -392,8 +458,12 @@ class _ChatScreenState extends State<ChatScreen> {
         'models': models.map((item) => item.toJson()).toList(),
         'chats': chats.map((item) => item.toJson()).toList(),
         'modelPath': modelPath,
+        'routingVersion': 1,
         'chatId': chatId,
         'draft': draft.text,
+        'draftFrames': attachments.map((frame) => frame.toJson()).toList(),
+        'currentVideoPath': currentVideoPath,
+        'currentVideoDurationMs': currentVideoDurationMs,
         'instructions': instructions,
         'frameCount': frameCount,
         'maxTokens': maxTokens,
@@ -581,6 +651,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final owned = await copyIntoApp(path, 'media');
       setState(() => attachments.add(MediaFrame(owned)));
+      await save();
     } catch (error) {
       setState(() => status = 'Image import failed: ' + error.toString());
     }
@@ -590,71 +661,182 @@ class _ChatScreenState extends State<ChatScreen> {
     final result = await FilePicker.platform.pickFiles(type: FileType.video);
     final path = result?.files.single.path;
     if (path == null) return;
-    setState(() => status = 'Sampling video frames on this device…');
+    if (samplingVideo || dataDir == null) return;
+    setState(() {
+      samplingVideo = true;
+      status = 'Scanning video on this device…';
+    });
     try {
       final duration = (await VideoDuration.read(path)).inMilliseconds;
       if (duration <= 0) throw StateError('Video duration is unavailable.');
-      final frames = <MediaFrame>[];
-      for (var index = 0; index < frameCount; index++) {
-        final time = ((index + 0.5) * duration / frameCount).round();
-        final dir = Directory(
-          dataDir!.path + Platform.pathSeparator + 'frames',
-        );
-        await dir.create(recursive: true);
-        final output =
-            dir.path +
-            Platform.pathSeparator +
-            DateTime.now().microsecondsSinceEpoch.toString() +
-            '_' +
-            index.toString() +
-            '.jpg';
-        final file = await FlutterVideoThumbnailPlus.thumbnailFile(
-          video: path,
-          thumbnailPath: output,
-          imageFormat: ImageFormat.jpeg,
-          maxWidth: 768,
-          maxHeight: 768,
-          quality: 80,
-          timeMs: time,
-        );
-        if (file == null || !await File(file).exists()) {
-          throw StateError(
-            'Frame extraction failed at ' + time.toString() + ' ms.',
-          );
-        }
-        frames.add(MediaFrame(file, time));
-      }
+      final frames = await VideoSampler.sample(
+        video: path,
+        durationMs: duration,
+        frameLimit: frameCount,
+        outputDir: Directory('${dataDir!.path}${Platform.pathSeparator}frames'),
+        onProgress: (done, total) {
+          if (mounted)
+            setState(() => status = 'Scanning video $done / $total frames…');
+        },
+      );
       setState(() {
-        attachments.addAll(frames);
+        attachments.addAll(
+          frames.map((frame) => MediaFrame(frame.path, frame.timeMs)),
+        );
+        currentVideoPath = path;
+        currentVideoDurationMs = duration;
         status =
-            'Sampled ' +
-            frames.length.toString() +
-            ' frames. Video answers use these frames only.';
+            'Kept ${frames.length} changed and time-spaced frames. Add an exact moment below if needed.';
       });
+      await save();
     } catch (error) {
-      setState(() => status = 'Video import failed: ' + error.toString());
+      showProblem('Video import failed: $error');
+    } finally {
+      if (mounted) setState(() => samplingVideo = false);
     }
   }
 
+  Future<void> addVideoMoment() async {
+    final video = currentVideoPath;
+    final duration = currentVideoDurationMs;
+    if (video == null || duration == null || duration <= 0 || dataDir == null)
+      return;
+    var timeMs = duration ~/ 2;
+    String? previewPath;
+    var loading = false;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, update) {
+          Future<void> preview() async {
+            update(() => loading = true);
+            try {
+              final frame = await VideoSampler.extractAt(
+                video: video,
+                timeMs: timeMs,
+                outputDir: Directory(
+                  '${dataDir!.path}${Platform.pathSeparator}frames',
+                ),
+              );
+              if (dialogContext.mounted) update(() => previewPath = frame.path);
+            } catch (error) {
+              if (dialogContext.mounted)
+                showProblem('Frame preview failed: $error');
+            } finally {
+              if (dialogContext.mounted) update(() => loading = false);
+            }
+          }
+
+          return AlertDialog(
+            title: const Text('Add an exact video moment'),
+            content: SizedBox(
+              width: 440,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('${(timeMs / 1000).toStringAsFixed(2)} seconds'),
+                  Slider(
+                    min: 0,
+                    max: duration.toDouble(),
+                    value: timeMs.toDouble(),
+                    onChanged: (value) => update(() => timeMs = value.round()),
+                    onChangeEnd: (_) => unawaited(preview()),
+                  ),
+                  if (loading) const CircularProgressIndicator(),
+                  if (previewPath != null)
+                    Image.file(
+                      File(previewPath!),
+                      height: 220,
+                      fit: BoxFit.contain,
+                    ),
+                  const Text(
+                    'Move the slider, then tap Add frame. The frame stays on this device.',
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: loading
+                    ? null
+                    : () async {
+                        try {
+                          final frame = await VideoSampler.extractAt(
+                            video: video,
+                            timeMs: timeMs,
+                            outputDir: Directory(
+                              '${dataDir!.path}${Platform.pathSeparator}frames',
+                            ),
+                          );
+                          if (!mounted) return;
+                          setState(
+                            () => attachments.add(
+                              MediaFrame(frame.path, frame.timeMs),
+                            ),
+                          );
+                          await save();
+                          if (dialogContext.mounted)
+                            Navigator.pop(dialogContext);
+                        } catch (error) {
+                          showProblem('Could not add frame: $error');
+                        }
+                      },
+                child: const Text('Add frame'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Future<void> send() async {
-    if (busy || dataDir == null) return;
-    final model = selectedModel;
-    if (model == null) {
-      setState(() => status = 'Import a GGUF model first.');
-      return;
-    }
-    if (!await File(model.path).exists()) {
-      setState(() => status = 'Model file is missing: ' + model.path);
-      return;
-    }
-    if (attachments.isNotEmpty && !model.vision) {
-      setState(
-        () => status = 'Image and video require a matching vision projector.',
+    if (busy || samplingVideo) return;
+    if (dataDir == null) {
+      showProblem(
+        'Local data is still loading. Try sending again in a moment.',
       );
       return;
     }
+    final initiallySelectedModel = selectedModel;
+    if (initiallySelectedModel == null) {
+      showProblem('Choose or download a local model before sending.');
+      return;
+    }
+    var model = initiallySelectedModel;
+    if (attachments.isNotEmpty && !model.vision) {
+      for (final candidate in models) {
+        if (candidate.vision) {
+          model = candidate;
+          break;
+        }
+      }
+      if (!model.vision) {
+        showProblem(
+          'Attached media needs a vision model and its matching projector. Your draft and frames are still here.',
+        );
+        return;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Using ${model.name} to inspect attached media.'),
+          ),
+        );
+      }
+    }
+    if (!await File(model.path).exists()) {
+      showProblem('The selected model file is missing: ${model.path}');
+      return;
+    }
     if (model.vision && !await File(model.projector!).exists()) {
-      setState(() => status = 'Vision projector file is missing.');
+      showProblem(
+        'The vision projector file is missing. Your draft and frames are still here.',
+      );
       return;
     }
     final prompt = draft.text.trim();
@@ -664,6 +846,8 @@ class _ChatScreenState extends State<ChatScreen> {
       prompt.isEmpty ? 'Describe these images.' : prompt,
       List.of(attachments),
     );
+    final originalVideoPath = currentVideoPath;
+    final originalVideoDurationMs = currentVideoDurationMs;
     chat.entries.add(question);
     if (chat.title == 'New chat')
       chat.title = question.text.length > 38
@@ -671,6 +855,8 @@ class _ChatScreenState extends State<ChatScreen> {
           : question.text;
     draft.clear();
     attachments.clear();
+    currentVideoPath = null;
+    currentVideoDurationMs = null;
     final reply = ChatEntry('assistant', '');
     chat.entries.add(reply);
     setState(() {
@@ -681,28 +867,55 @@ class _ChatScreenState extends State<ChatScreen> {
     await save();
     try {
       final input = <LlamaResponseInputItem>[];
-      for (final item in chat.entries.where((item) => item != reply)) {
-        final parts = <LlamaContentPart>[LlamaTextPart(item.text)];
-        for (final frame in item.frames) {
-          if (frame.timeMs != null) {
-            parts.add(
+      final history = chat.entries
+          .where(
+            (item) =>
+                item != reply &&
+                item != question &&
+                item.text.isNotEmpty &&
+                item.text != '[Generation failed]',
+          )
+          .toList();
+      final recent = history.length > 6
+          ? history.sublist(history.length - 6)
+          : history;
+      for (final item in question.frames.isEmpty ? recent : <ChatEntry>[]) {
+        final text = item.text.length > 900
+            ? item.text.substring(0, 900)
+            : item.text;
+        input.add(
+          LlamaResponseInputItem(
+            role: item.role,
+            content: [
               LlamaTextPart(
-                'Video frame at ' +
-                    (frame.timeMs! / 1000).toStringAsFixed(1) +
-                    ' seconds:',
+                item.frames.isEmpty
+                    ? text
+                    : '$text [Earlier media was attached; those frames are not part of this request.]',
               ),
-            );
-          }
-          parts.add(LlamaImageFilePart(path: frame.path));
-        }
-        input.add(LlamaResponseInputItem(role: item.role, content: parts));
+            ],
+          ),
+        );
       }
+      final parts = <LlamaContentPart>[LlamaTextPart(question.text)];
+      for (final frame in question.frames) {
+        if (frame.timeMs != null) {
+          parts.add(
+            LlamaTextPart(
+              'Video frame at ' +
+                  (frame.timeMs! / 1000).toStringAsFixed(1) +
+                  ' seconds:',
+            ),
+          );
+        }
+        parts.add(LlamaImageFilePart(path: frame.path));
+      }
+      input.add(LlamaResponseInputItem(role: 'user', content: parts));
       final client = LlamaOpenAIClient(
         models: {
           'active': LlamaModelConfig(
             modelPath: model.path,
             mmprojPath: model.projector,
-            contextSize: 4096,
+            contextSize: model.vision ? 8192 : 4096,
             gpuLayerCount: 0,
           ),
         },
@@ -711,7 +924,9 @@ class _ChatScreenState extends State<ChatScreen> {
       await for (final event in client.responses.stream(
         model: 'active',
         input: input,
-        instructions: instructions,
+        instructions: model.name.toLowerCase().contains('qwen3')
+            ? '$instructions\n/no_think'
+            : instructions,
         maxOutputTokens: maxTokens,
       )) {
         if (cancelled) break;
@@ -725,9 +940,13 @@ class _ChatScreenState extends State<ChatScreen> {
         reply.text = cancelled ? '[Stopped]' : '[No response]';
       if (mounted) setState(() => status = cancelled ? 'Stopped' : 'Ready');
     } catch (error) {
-      if (reply.text.isEmpty) reply.text = '[Generation failed]';
-      if (mounted)
-        setState(() => status = 'Local generation failed: ' + error.toString());
+      chat.entries.remove(reply);
+      chat.entries.remove(question);
+      if (draft.text.trim().isEmpty) draft.text = question.text;
+      attachments.insertAll(0, question.frames);
+      currentVideoPath = originalVideoPath;
+      currentVideoDurationMs = originalVideoDurationMs;
+      showProblem('Local generation failed: $error');
     } finally {
       if (mounted) setState(() => busy = false);
       await save();
@@ -848,7 +1067,8 @@ class _ChatScreenState extends State<ChatScreen> {
                         label: const Text('Import model'),
                       ),
                       OutlinedButton.icon(
-                        onPressed: selectedModel == null
+                        onPressed:
+                            selectedModel == null || modelPath == autoModelPath
                             ? null
                             : () async {
                                 await importModel(projector: true);
@@ -889,55 +1109,69 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   Expanded(
                     child: ListView(
-                      children: models
-                          .map(
-                            (model) => RadioListTile<String>(
-                              title: Text(model.name),
-                              subtitle: Text(
-                                (model.vision
-                                        ? 'Text + vision · '
-                                        : 'Text only · ') +
-                                    model.path,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              secondary: PopupMenuButton<String>(
-                                tooltip: 'Model actions',
-                                icon: const Icon(Icons.more_vert),
-                                onSelected: (action) async {
-                                  if (action == 'inspect')
-                                    await inspectModel(model);
-                                  if (action == 'rename')
-                                    await renameModel(model);
-                                  if (action == 'remove')
-                                    await removeModel(model);
-                                  update(() {});
-                                },
-                                itemBuilder: (context) => const [
-                                  PopupMenuItem(
-                                    value: 'inspect',
-                                    child: Text('Inspect GGUF'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'rename',
-                                    child: Text('Rename'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'remove',
-                                    child: Text('Remove'),
-                                  ),
-                                ],
-                              ),
-                              value: model.path,
-                              groupValue: modelPath,
-                              onChanged: (value) {
-                                setState(() => modelPath = value);
-                                update(() {});
-                                unawaited(save());
-                              },
+                      children: [
+                        if (models.length > 1)
+                          RadioListTile<String>(
+                            title: const Text('Auto · text + vision'),
+                            subtitle: const Text(
+                              'Use the text model for chat and the vision model for attached media.',
                             ),
-                          )
-                          .toList(),
+                            value: autoModelPath,
+                            groupValue: modelPath,
+                            onChanged: (value) {
+                              setState(() => modelPath = value);
+                              update(() {});
+                              unawaited(save());
+                            },
+                          ),
+                        ...models.map(
+                          (model) => RadioListTile<String>(
+                            title: Text(model.name),
+                            subtitle: Text(
+                              (model.vision
+                                      ? 'Text + vision · '
+                                      : 'Text only · ') +
+                                  model.path,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            secondary: PopupMenuButton<String>(
+                              tooltip: 'Model actions',
+                              icon: const Icon(Icons.more_vert),
+                              onSelected: (action) async {
+                                if (action == 'inspect')
+                                  await inspectModel(model);
+                                if (action == 'rename')
+                                  await renameModel(model);
+                                if (action == 'remove')
+                                  await removeModel(model);
+                                update(() {});
+                              },
+                              itemBuilder: (context) => const [
+                                PopupMenuItem(
+                                  value: 'inspect',
+                                  child: Text('Inspect GGUF'),
+                                ),
+                                PopupMenuItem(
+                                  value: 'rename',
+                                  child: Text('Rename'),
+                                ),
+                                PopupMenuItem(
+                                  value: 'remove',
+                                  child: Text('Remove'),
+                                ),
+                              ],
+                            ),
+                            value: model.path,
+                            groupValue: modelPath,
+                            onChanged: (value) {
+                              setState(() => modelPath = value);
+                              update(() {});
+                              unawaited(save());
+                            },
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -981,9 +1215,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   Text('Video frames: ' + count.toString()),
                   Slider(
                     value: count.toDouble(),
-                    min: 2,
-                    max: 8,
-                    divisions: 6,
+                    min: 4,
+                    max: 12,
+                    divisions: 8,
                     onChanged: (value) => update(() => count = value.round()),
                   ),
                   Text('Maximum output tokens: ' + limit.toString()),
@@ -1295,6 +1529,15 @@ class _ChatScreenState extends State<ChatScreen> {
                                 messageBubble(chat.entries[index]),
                           ),
                   ),
+                  if (currentVideoPath != null && attachments.isNotEmpty)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: samplingVideo ? null : addVideoMoment,
+                        icon: const Icon(Icons.add_photo_alternate_outlined),
+                        label: const Text('Add exact video moment'),
+                      ),
+                    ),
                   if (attachments.isNotEmpty)
                     SizedBox(
                       height: 82,
@@ -1317,9 +1560,12 @@ class _ChatScreenState extends State<ChatScreen> {
                                     right: 0,
                                     child: IconButton.filledTonal(
                                       iconSize: 14,
-                                      onPressed: () => setState(
-                                        () => attachments.remove(frame),
-                                      ),
+                                      onPressed: () {
+                                        setState(
+                                          () => attachments.remove(frame),
+                                        );
+                                        unawaited(save());
+                                      },
                                       icon: const Icon(Icons.close),
                                     ),
                                   ),
@@ -1327,6 +1573,30 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             )
                             .toList(),
+                      ),
+                    ),
+                  if (busy || samplingVideo)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 4,
+                      ),
+                      child: Row(
+                        children: [
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              status,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   SafeArea(
