@@ -57,8 +57,12 @@ jobs:
           xcrun simctl install "$simulator" build/ios/iphonesimulator/Runner.app
           container=$(xcrun simctl get_app_container "$simulator" com.localai.localAiChat data)
           mkdir -p "$container/Library/Application Support"
-          xcrun simctl launch "$simulator" com.localai.localAiChat --self-test-keychain "$container/Library/Application Support/keychain-test.json"
-          sleep 3
+          touch "$container/Library/Application Support/run-keychain-self-test"
+          xcrun simctl launch "$simulator" com.localai.localAiChat
+          for attempt in $(seq 1 20); do
+            if [ -f "$container/Library/Application Support/keychain-test.json" ]; then break; fi
+            sleep 1
+          done
           cat "$container/Library/Application Support/keychain-test.json"
           grep -q '"ok":true' "$container/Library/Application Support/keychain-test.json"
           xcrun simctl launch "$simulator" com.localai.localAiChat

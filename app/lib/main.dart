@@ -47,6 +47,21 @@ Future<void> main(List<String> args) async {
     await runKeychainSelfTest(args);
     exit(0);
   }
+  // iOS Flutter launch arguments are not reliably forwarded to Dart by the
+  // simulator. A marker in this app's own support directory gives CI a stable
+  // way to exercise the same native keychain plugin before showing the UI.
+  if (Platform.isIOS) {
+    final support = await getApplicationSupportDirectory();
+    final marker = File('${support.path}/run-keychain-self-test');
+    if (await marker.exists()) {
+      await marker.delete();
+      await runKeychainSelfTest([
+        '--self-test-keychain',
+        '${support.path}/keychain-test.json',
+      ]);
+      exit(0);
+    }
+  }
   runApp(const LocalChatApp());
 }
 
@@ -194,13 +209,15 @@ class _ChatScreenState extends State<ChatScreen> {
   String? chatId;
   String status = 'Loading local data…';
   String instructions =
-      'You are a private local assistant. Answer the latest user message directly. Describe only details visible in attached images or video frames, including adult nudity when visible. Do not invent an unseen story. Treat a user correction as newer information and do not repeat an earlier mistaken answer.';
+      'You are a private local assistant. Answer the latest user message directly. Describe only details visible in attached images or video frames, including adult nudity when visible. Do not invent unseen anatomy, actions, or a story. Treat a user correction as newer information and do not repeat an earlier mistaken answer.';
   bool busy = false;
   bool cancelled = false;
   int frameCount = 8;
   int maxTokens = 400;
   String themeName = 'Aurora';
   Color customColor = const Color(0xFF55C8FF);
+  Color starColor = const Color(0xFFB6DCFF);
+  Color auroraColor = const Color(0xFF58F6BA);
   String backgroundStyle = 'Waves';
   bool motion = true;
   double motionSpeed = 1.0;
@@ -528,7 +545,7 @@ class _ChatScreenState extends State<ChatScreen> {
         if (routingVersion == 0 &&
             instructions ==
                 'You are a private, helpful local assistant. Answer directly and honestly.') {
-          instructions = 'You are a private local assistant. Answer the latest user message directly. Describe only details visible in attached images or video frames, including adult nudity when visible. Do not invent an unseen story. Treat a user correction as newer information and do not repeat an earlier mistaken answer.';
+          instructions = 'You are a private local assistant. Answer the latest user message directly. Describe only details visible in attached images or video frames, including adult nudity when visible. Do not invent unseen anatomy, actions, or a story. Treat a user correction as newer information and do not repeat an earlier mistaken answer.';
         }
         frameCount =
             (routingVersion == 0 ? 8 : (data['frameCount'] as int? ?? 8))
@@ -538,6 +555,8 @@ class _ChatScreenState extends State<ChatScreen> {
         themeName = data['themeName'] as String? ?? 'Aurora';
         if (!GlassPalette.presets.containsKey(themeName)) themeName = 'Aurora';
         customColor = Color(data['customColor'] as int? ?? 0xFF55C8FF);
+        starColor = Color(data['starColor'] as int? ?? 0xFFB6DCFF);
+        auroraColor = Color(data['auroraColor'] as int? ?? 0xFF58F6BA);
         backgroundStyle = data['backgroundStyle'] as String? ?? 'Waves';
         motion = data['motion'] as bool? ?? true;
         motionSpeed = (data['motionSpeed'] as num?)?.toDouble() ?? 1.0;
@@ -707,6 +726,8 @@ class _ChatScreenState extends State<ChatScreen> {
         'maxTokens': maxTokens,
         'themeName': themeName,
         'customColor': customColor.toARGB32(),
+        'starColor': starColor.toARGB32(),
+        'auroraColor': auroraColor.toARGB32(),
         'backgroundStyle': backgroundStyle,
         'motion': motion,
         'motionSpeed': motionSpeed,
@@ -1351,6 +1372,13 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
       final parts = <LlamaContentPart>[LlamaTextPart(question.text)];
+      if (inferenceFrames.isNotEmpty) {
+        parts.add(
+          const LlamaTextPart(
+            'Use only these attached frames as visual evidence. State the main visible actions and any visible nudity plainly. Do not guess body parts that are covered, too small to see, or inside the body. Do not make a repetitive body-part list. If the frames miss an event, say you cannot tell from these frames.',
+          ),
+        );
+      }
       for (final frame in inferenceFrames) {
         if (frame.timeMs != null) {
           parts.add(
@@ -1376,6 +1404,7 @@ class _ChatScreenState extends State<ChatScreen> {
       );
       setState(() => status = 'Generating on this device…');
       var rawReply = '';
+      var stoppedForLoop = false;
       await for (final event in client.responses.stream(
         model: 'active',
         input: input,
@@ -1387,7 +1416,9 @@ class _ChatScreenState extends State<ChatScreen> {
               memory: chat.memory,
             ) +
             (model.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''),
-        maxOutputTokens: maxTokens,
+        maxOutputTokens: model.vision && inferenceFrames.isNotEmpty
+            ? maxTokens.clamp(80, 260)
+            : maxTokens,
         temperature: 0.65,
         topP: 0.90,
       )) {
@@ -1395,9 +1426,16 @@ class _ChatScreenState extends State<ChatScreen> {
         if (event is LlamaResponseOutputTextDelta) {
           rawReply += event.delta;
           final visible = visibleReply(rawReply);
-          if (mounted) setState(() => reply.text = visible);
-          if (isRepeatingReply(visible)) {
-            if (mounted) setState(() => status = 'Stopped a repeating reply.');
+          final repeatedFrom = repetitiveSentenceRunStart(visible);
+          if (mounted) {
+            setState(
+              () => reply.text = repeatedFrom == null
+                  ? visible
+                  : visible.substring(0, repeatedFrom).trimRight(),
+            );
+          }
+          if (repeatedFrom != null || isRepeatingReply(visible)) {
+            stoppedForLoop = true;
             break;
           }
         } else if (event is LlamaResponseFailed) {
@@ -1405,8 +1443,20 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       }
       if (reply.text.isEmpty)
-        reply.text = cancelled ? '[Stopped]' : '[No response]';
-      if (mounted) setState(() => status = cancelled ? 'Stopped' : 'Ready');
+        reply.text = cancelled
+            ? '[Stopped]'
+            : stoppedForLoop
+            ? '[The model repeated itself. Try another model or fewer frames.]'
+            : '[No response]';
+      if (mounted) {
+        setState(
+          () => status = cancelled
+              ? 'Stopped'
+              : stoppedForLoop
+              ? 'Stopped a repetitive reply.'
+              : 'Ready',
+        );
+      }
     } catch (error) {
       chat.entries.remove(reply);
       chat.entries.remove(question);
@@ -1891,8 +1941,16 @@ class _ChatScreenState extends State<ChatScreen> {
     final promptController = TextEditingController(text: instructions);
     final speechController = TextEditingController(text: speechRoot ?? '');
     var selectedCustom = customColor;
+    var selectedStar = starColor;
+    var selectedAurora = auroraColor;
     final colorController = TextEditingController(
       text: customColor.toARGB32().toRadixString(16).substring(2).toUpperCase(),
+    );
+    final starColorController = TextEditingController(
+      text: starColor.toARGB32().toRadixString(16).substring(2).toUpperCase(),
+    );
+    final auroraColorController = TextEditingController(
+      text: auroraColor.toARGB32().toRadixString(16).substring(2).toUpperCase(),
     );
     var count = frameCount;
     var limit = maxTokens;
@@ -2059,6 +2117,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                   'Pulse',
                                   'Nebula',
                                   'Starfield',
+                                  'Northern Lights',
                                   'Mesh',
                                   'Quiet',
                                 ]
@@ -2073,6 +2132,85 @@ class _ChatScreenState extends State<ChatScreen> {
                           () => selectedStyle = value ?? selectedStyle,
                         ),
                       ),
+                      if (selectedStyle == 'Starfield' ||
+                          selectedStyle == 'Northern Lights') ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                color: selectedStyle == 'Starfield'
+                                    ? selectedStar
+                                    : selectedAurora,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: TextField(
+                                controller: selectedStyle == 'Starfield'
+                                    ? starColorController
+                                    : auroraColorController,
+                                decoration: InputDecoration(
+                                  labelText: selectedStyle == 'Starfield'
+                                      ? 'Star color (hex)'
+                                      : 'Northern lights color (hex)',
+                                  prefixText: '#',
+                                ),
+                                maxLength: 6,
+                                onChanged: (value) {
+                                  if (!RegExp(r'^[0-9a-fA-F]{6}$')
+                                      .hasMatch(value))
+                                    return;
+                                  update(() {
+                                    final chosen = Color(
+                                      0xFF000000 | int.parse(value, radix: 16),
+                                    );
+                                    if (selectedStyle == 'Starfield') {
+                                      selectedStar = chosen;
+                                    } else {
+                                      selectedAurora = chosen;
+                                    }
+                                  });
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                        Slider(
+                          value: HSLColor.fromColor(
+                            selectedStyle == 'Starfield'
+                                ? selectedStar
+                                : selectedAurora,
+                          ).hue,
+                          min: 0,
+                          max: 360,
+                          label: 'Color hue',
+                          onChanged: (value) => update(() {
+                            if (selectedStyle == 'Starfield') {
+                              selectedStar = HSLColor.fromColor(selectedStar)
+                                  .withHue(value)
+                                  .toColor();
+                              starColorController.text = selectedStar
+                                  .toARGB32()
+                                  .toRadixString(16)
+                                  .substring(2)
+                                  .toUpperCase();
+                            } else {
+                              selectedAurora = HSLColor.fromColor(
+                                selectedAurora,
+                              ).withHue(value).toColor();
+                              auroraColorController.text = selectedAurora
+                                  .toARGB32()
+                                  .toRadixString(16)
+                                  .substring(2)
+                                  .toUpperCase();
+                            }
+                          }),
+                        ),
+                      ],
                       SwitchListTile(
                         title: const Text('Motion'),
                         value: animated,
@@ -2244,6 +2382,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 setState(() {
                   themeName = selectedTheme;
                   customColor = selectedCustom;
+                  starColor = selectedStar;
+                  auroraColor = selectedAurora;
                   backgroundStyle = selectedStyle;
                   motion = animated;
                   motionSpeed = speed;
@@ -2272,6 +2412,8 @@ class _ChatScreenState extends State<ChatScreen> {
     promptController.dispose();
     speechController.dispose();
     colorController.dispose();
+    starColorController.dispose();
+    auroraColorController.dispose();
     fishIdController.dispose();
     fishKeyController.dispose();
   }
@@ -2360,6 +2502,8 @@ class _ChatScreenState extends State<ChatScreen> {
     return GlassDesign(
       themeName: themeName,
       customColor: customColor,
+      starColor: starColor,
+      auroraColor: auroraColor,
       motion: motion,
       speed: motionSpeed,
       backgroundStyle: backgroundStyle,

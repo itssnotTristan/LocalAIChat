@@ -199,6 +199,8 @@ class GlassDesign extends InheritedWidget {
   const GlassDesign({
     required this.themeName,
     required this.customColor,
+    required this.starColor,
+    required this.auroraColor,
     required this.motion,
     required this.speed,
     required this.backgroundStyle,
@@ -207,6 +209,8 @@ class GlassDesign extends InheritedWidget {
   });
   final String themeName;
   final Color customColor;
+  final Color starColor;
+  final Color auroraColor;
   final bool motion;
   final double speed;
   final String backgroundStyle;
@@ -216,6 +220,8 @@ class GlassDesign extends InheritedWidget {
   bool updateShouldNotify(GlassDesign oldWidget) =>
       themeName != oldWidget.themeName ||
       customColor != oldWidget.customColor ||
+      starColor != oldWidget.starColor ||
+      auroraColor != oldWidget.auroraColor ||
       motion != oldWidget.motion ||
       speed != oldWidget.speed ||
       backgroundStyle != oldWidget.backgroundStyle;
@@ -269,6 +275,8 @@ class _GlassBackgroundState extends State<GlassBackground> {
           accent,
           design.backgroundStyle,
           tick,
+          design.starColor,
+          design.auroraColor,
         ),
         child: const SizedBox.expand(),
       ),
@@ -277,11 +285,20 @@ class _GlassBackgroundState extends State<GlassBackground> {
 }
 
 class _AtmospherePainter extends CustomPainter {
-  _AtmospherePainter(this.palette, this.accent, this.style, this.tick);
+  _AtmospherePainter(
+    this.palette,
+    this.accent,
+    this.style,
+    this.tick,
+    this.starColor,
+    this.auroraColor,
+  );
   final GlassPalette palette;
   final Color accent;
   final String style;
   final double tick;
+  final Color starColor;
+  final Color auroraColor;
   @override
   void paint(Canvas canvas, Size size) {
     final bounds = Offset.zero & size;
@@ -295,12 +312,17 @@ class _AtmospherePainter extends CustomPainter {
         ).createShader(bounds),
     );
     if (style == 'Quiet') return;
+    final glowColor = style == 'Starfield'
+        ? starColor
+        : style == 'Northern Lights'
+        ? auroraColor
+        : accent;
     final glow = Paint()
       ..shader =
           RadialGradient(
             colors: [
-              accent.withValues(alpha: 0.25),
-              accent.withValues(alpha: 0),
+              glowColor.withValues(alpha: 0.25),
+              glowColor.withValues(alpha: 0),
             ],
           ).createShader(
             Rect.fromCircle(
@@ -330,14 +352,97 @@ class _AtmospherePainter extends CustomPainter {
         );
       }
     } else if (style == 'Starfield') {
-      for (var i = 0; i < 90; i++) {
-        final x = ((i * 0.61803398875 + 0.11) % 1) * size.width;
-        final y = ((i * 0.38196601125 + 0.37) % 1) * size.height;
-        final pulse = 0.5 + 0.5 * math.sin(tick * 0.8 + i * 1.7);
+      // Irrational offsets distribute stars without a visible grid. Each star
+      // has its own twinkle phase; larger ones get a soft halo.
+      final count = (size.width * size.height / 1300).round().clamp(260, 420);
+      for (var i = 0; i < count; i++) {
+        final x = ((i * 0.754877666 + 0.17) % 1) * size.width;
+        final y = ((i * 0.569840291 + 0.41) % 1) * size.height;
+        final center = Offset(x, y);
+        final pulse = math
+            .pow(
+              0.5 + 0.5 * math.sin(tick * (0.7 + i % 7 * 0.11) + i * 2.31),
+              3,
+            )
+            .toDouble();
+        final bright = i % 11 == 0;
+        if (bright && pulse > 0.14) {
+          final halo = 5.0 + pulse * 6.0;
+          canvas.drawCircle(
+            center,
+            halo,
+            Paint()
+              ..shader = RadialGradient(
+                colors: [
+                  starColor.withValues(alpha: pulse * 0.35),
+                  starColor.withValues(alpha: 0),
+                ],
+              ).createShader(Rect.fromCircle(center: center, radius: halo)),
+          );
+        }
         canvas.drawCircle(
-          Offset(x, y),
-          i % 8 == 0 ? 1.8 : 0.8,
-          Paint()..color = accent.withValues(alpha: 0.12 + pulse * 0.34),
+          center,
+          bright ? 1.3 + pulse * 0.8 : 0.55 + pulse * 0.45,
+          Paint()
+            ..color = starColor.withValues(
+              alpha: (bright ? 0.25 : 0.14) + pulse * 0.70,
+            ),
+        );
+      }
+    } else if (style == 'Northern Lights') {
+      for (var band = 0; band < 5; band++) {
+        final hue = (HSLColor.fromColor(auroraColor).hue + band * 11) % 360;
+        final color = HSLColor.fromAHSL(1, hue, 0.78, 0.62).toColor();
+        final top = size.height * (0.06 + band * 0.095);
+        final depth = size.height * (0.24 + band * 0.035);
+        double wave(double x) =>
+            top +
+            30 * math.sin(x / (size.width * 0.27) + tick * 0.36 + band) +
+            13 * math.sin(x / (size.width * 0.09) - tick * 0.19 + band);
+        final curtain = Path();
+        for (var x = 0.0; x <= size.width + 12; x += 12) {
+          if (x == 0) {
+            curtain.moveTo(x, wave(x));
+          } else {
+            curtain.lineTo(x, wave(x));
+          }
+        }
+        for (var x = size.width + 12; x >= 0; x -= 12) {
+          final shimmer =
+              0.68 + 0.25 * math.sin(x / 65 + tick * 0.53 + band * 1.7);
+          curtain.lineTo(x, wave(x) + depth * shimmer);
+        }
+        curtain.close();
+        canvas.drawPath(
+          curtain,
+          Paint()
+            ..shader = LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                color.withValues(alpha: 0.03),
+                color.withValues(alpha: 0.22),
+                color.withValues(alpha: 0.12),
+                color.withValues(alpha: 0),
+              ],
+              stops: const [0, 0.20, 0.55, 1],
+            ).createShader(Rect.fromLTWH(0, top - 45, size.width, depth + 90)),
+        );
+        final crest = Path();
+        for (var x = 0.0; x <= size.width + 12; x += 12) {
+          final y = wave(x) + depth * 0.22;
+          if (x == 0) {
+            crest.moveTo(x, y);
+          } else {
+            crest.lineTo(x, y);
+          }
+        }
+        canvas.drawPath(
+          crest,
+          Paint()
+            ..color = color.withValues(alpha: 0.13)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 3,
         );
       }
     } else if (style == 'Mesh') {
@@ -395,6 +500,39 @@ class _AtmospherePainter extends CustomPainter {
             ..strokeWidth = 2,
         );
       }
+    } else if (style == 'Ribbons') {
+      for (var i = 0; i < 6; i++) {
+        final base = size.height * (0.19 + i * 0.13);
+        double wave(double x) =>
+            base +
+            28 * math.sin(x / 92 + tick * (i.isEven ? 0.75 : -0.59) + i) +
+            12 * math.sin(x / 43 - tick * 0.38 + i * 2.1);
+        final ribbon = Path();
+        final edge = Path();
+        for (var x = 0.0; x <= size.width + 12; x += 12) {
+          final y = wave(x);
+          if (x == 0) {
+            ribbon.moveTo(x, y);
+            edge.moveTo(x, y);
+          } else {
+            ribbon.lineTo(x, y);
+            edge.lineTo(x, y);
+          }
+        }
+        for (var x = size.width + 12; x >= 0; x -= 12) {
+          ribbon.lineTo(x, wave(x) + 17 + 7 * math.sin(x / 105 + tick + i));
+        }
+        ribbon.close();
+        final color = i.isEven ? accent : palette.accent2;
+        canvas.drawPath(ribbon, Paint()..color = color.withValues(alpha: 0.09));
+        canvas.drawPath(
+          edge,
+          Paint()
+            ..color = color.withValues(alpha: 0.25)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2,
+        );
+      }
     } else {
       for (var i = 0; i < 7; i++) {
         final path = Path();
@@ -431,5 +569,7 @@ class _AtmospherePainter extends CustomPainter {
       old.tick != tick ||
       old.palette != palette ||
       old.accent != accent ||
+      old.starColor != starColor ||
+      old.auroraColor != auroraColor ||
       old.style != style;
 }

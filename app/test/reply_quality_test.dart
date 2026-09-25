@@ -21,4 +21,24 @@ void main() {
       isTrue,
     );
   });
+
+  test('cuts a changing-word anatomy loop at its first sentence', () {
+    const lead = 'A woman is on a bed and turns toward the camera. ';
+    const loop =
+        'She has a small mouth. She has a small nose. '
+        'She has a small chin. She has a small jaw.';
+    final start = repetitiveSentenceRunStart(lead + loop);
+    expect(start, isNotNull);
+    expect((lead + loop).substring(0, start!).trimRight(), lead.trimRight());
+  });
+
+  test('keeps normal descriptions with varied sentence structure', () {
+    expect(
+      repetitiveSentenceRunStart(
+        'She turns to the camera. The bed has a gray cover. '
+        'Her black top is pulled up. She moves out of view.',
+      ),
+      isNull,
+    );
+  });
 }
