@@ -58,8 +58,15 @@ jobs:
           xcrun simctl launch "$simulator" com.localai.localAiChat
           sleep 5
           xcrun simctl io "$simulator" screenshot iphone-preview.png
+          xcrun simctl terminate "$simulator" com.localai.localAiChat
+          container=$(xcrun simctl get_app_container "$simulator" com.localai.localAiChat data)
+          mkdir -p "$container/Library/Application Support"
+          printf '%s' '{"themeName":"Chat Dark","backgroundStyle":"Quiet","motion":false}' > "$container/Library/Application Support/local_chat.json"
+          xcrun simctl launch "$simulator" com.localai.localAiChat
+          sleep 5
+          xcrun simctl io "$simulator" screenshot iphone-preview-dark.png
       - uses: actions/upload-artifact@v4
         with:
           name: LocalAIChat-iPhone-preview
-          path: app/iphone-preview.png
+          path: app/iphone-preview*.png
           retention-days: 7

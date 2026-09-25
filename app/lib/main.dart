@@ -593,13 +593,24 @@ class _ChatScreenState extends State<ChatScreen> {
     final dir = Directory(dataDir!.path + Platform.pathSeparator + folder);
     await dir.create(recursive: true);
     final name = path.split(RegExp(r'[/\\]')).last;
-    return (await File(path).copy(
-      dir.path +
-          Platform.pathSeparator +
-          DateTime.now().microsecondsSinceEpoch.toString() +
-          '_' +
-          name,
-    )).path;
+    final destination =
+        '${dir.path}${Platform.pathSeparator}'
+        '${DateTime.now().microsecondsSinceEpoch}_$name';
+    if (Platform.isIOS) {
+      final temporary = await getTemporaryDirectory();
+      final appRoot = dataDir!.parent.parent.path;
+      final pickedCache =
+          path.startsWith('${temporary.path}/') ||
+          path.startsWith('$appRoot/Library/Caches/');
+      if (pickedCache) {
+        try {
+          return (await File(path).rename(destination)).path;
+        } on FileSystemException {
+          // Some document providers require a copy even for cached picker files.
+        }
+      }
+    }
+    return (await File(path).copy(destination)).path;
   }
 
   Future<void> importModel({required bool projector}) async {
