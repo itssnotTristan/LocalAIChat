@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:lib_llama_cpp/lib_llama_cpp.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -12,6 +13,7 @@ import 'speech_service.dart';
 import 'self_test.dart';
 import 'gguf_info.dart';
 import 'model_download.dart';
+import 'reply_quality.dart';
 import 'speech_download.dart';
 import 'video_duration.dart';
 import 'video_sampler.dart';
@@ -24,6 +26,10 @@ Future<void> main(List<String> args) async {
   }
   if (args.isNotEmpty && args.first == '--self-test-text') {
     await runTextSelfTest(args);
+    exit(0);
+  }
+  if (args.isNotEmpty && args.first == '--probe-vision') {
+    await runVisionProbe(args);
     exit(0);
   }
   runApp(const LocalChatApp());
@@ -96,6 +102,16 @@ class ChatEntry {
   );
 }
 
+/// Keep ordinary chat context but exclude captions inferred from old media.
+List<ChatEntry> textHistorySinceMedia(List<ChatEntry> history) {
+  final lastMedia = history.lastIndexWhere((item) => item.frames.isNotEmpty);
+  final first = lastMedia < 0 ? 0 : (lastMedia + 2).clamp(0, history.length);
+  final textHistory = history.sublist(first);
+  return textHistory.length > 6
+      ? textHistory.sublist(textHistory.length - 6)
+      : textHistory;
+}
+
 class Conversation {
   Conversation(this.id, this.title, [List<ChatEntry>? entries])
     : entries = entries ?? [];
@@ -142,6 +158,7 @@ class _ChatScreenState extends State<ChatScreen> {
   int frameCount = 8;
   int maxTokens = 400;
   String themeName = 'Aurora';
+  Color customColor = const Color(0xFF55C8FF);
   String backgroundStyle = 'Waves';
   bool motion = true;
   double motionSpeed = 1.0;
@@ -167,15 +184,24 @@ class _ChatScreenState extends State<ChatScreen> {
         if (model.path == modelPath && model.vision) return model;
       }
       for (final model in models) {
+        if (model.vision && model.name.contains('Qwen3.5')) return model;
+      }
+      for (final model in models) {
         if (model.vision) return model;
       }
     }
     if (modelPath == autoModelPath) {
       if (attachments.isNotEmpty) {
         for (final model in models) {
+          if (model.vision && model.name.contains('Qwen3.5')) return model;
+        }
+        for (final model in models) {
           if (model.vision) return model;
         }
       } else {
+        for (final model in models) {
+          if (model.vision && model.name.contains('Qwen3.5')) return model;
+        }
         for (final model in models) {
           if (!model.vision && model.name.contains('Qwen2.5')) return model;
         }
@@ -293,6 +319,51 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> downloadDetailedVisionModel() async {
+    if (downloading || dataDir == null) return;
+    final directory = dataDir!.path + Platform.pathSeparator + 'models';
+    setState(() {
+      downloading = true;
+      status = 'Downloading detailed vision model (about 3 GB)…';
+    });
+    var lastShownMiB = -1;
+    try {
+      final files = await downloader.downloadDetailedVision(directory, (
+        name,
+        received,
+        total,
+      ) {
+        final currentMiB = received ~/ 1048576;
+        if (currentMiB == lastShownMiB || !mounted) return;
+        lastShownMiB = currentMiB;
+        setState(
+          () => status =
+              'Downloading $name · $currentMiB MiB' +
+              (total == null ? '' : ' / ${total ~/ 1048576} MiB'),
+        );
+      });
+      if (!models.any((item) => item.path == files.model)) {
+        models.add(
+          LocalModel(
+            'Qwen3.5 4B Uncensored · vision',
+            files.model,
+            files.projector,
+          ),
+        );
+      }
+      modelPath = autoModelPath;
+      setState(
+        () => status =
+            'Detailed vision model and projector passed SHA-256 checks.',
+      );
+      await save();
+    } catch (error) {
+      if (mounted) showProblem('Model download failed: $error');
+    } finally {
+      if (mounted) setState(() => downloading = false);
+    }
+  }
+
   Future<void> downloadSpeechModels() async {
     final root = speechRoot;
     if (root == null || downloadingSpeech) return;
@@ -377,6 +448,7 @@ class _ChatScreenState extends State<ChatScreen> {
         maxTokens = data['maxTokens'] as int? ?? 400;
         themeName = data['themeName'] as String? ?? 'Aurora';
         if (!GlassPalette.presets.containsKey(themeName)) themeName = 'Aurora';
+        customColor = Color(data['customColor'] as int? ?? 0xFF55C8FF);
         backgroundStyle = data['backgroundStyle'] as String? ?? 'Waves';
         motion = data['motion'] as bool? ?? true;
         motionSpeed = (data['motionSpeed'] as num?)?.toDouble() ?? 1.0;
@@ -416,6 +488,21 @@ class _ChatScreenState extends State<ChatScreen> {
           if (await File(path).exists() &&
               !models.any((item) => item.path == path)) {
             models.add(LocalModel('Qwen2.5 1.5B · text', path));
+            break;
+          }
+        }
+        for (final base in [
+          '$executableDir/models/qwen35-4b-uncensored',
+          'D:/LocalAIChat/models/qwen35-4b-uncensored',
+        ]) {
+          final path = '$base/${ModelDownloader.detailedVisionName}';
+          final projector = '$base/${ModelDownloader.detailedProjectorName}';
+          if (await File(path).exists() &&
+              await File(projector).exists() &&
+              !models.any((item) => item.path == path)) {
+            models.add(
+              LocalModel('Qwen3.5 4B Uncensored · vision', path, projector),
+            );
             break;
           }
         }
@@ -480,6 +567,7 @@ class _ChatScreenState extends State<ChatScreen> {
         'frameCount': frameCount,
         'maxTokens': maxTokens,
         'themeName': themeName,
+        'customColor': customColor.toARGB32(),
         'backgroundStyle': backgroundStyle,
         'motion': motion,
         'motionSpeed': motionSpeed,
@@ -515,13 +603,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> importModel({required bool projector}) async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['gguf'],
-    );
+    final result = await FilePicker.platform.pickFiles(type: FileType.any);
     final path = result?.files.single.path;
     if (path == null) return;
     try {
+      if (!path.toLowerCase().endsWith('.gguf')) {
+        throw const FormatException('Choose a .gguf model or projector file.');
+      }
       final info = await GgufInfo.read(path);
       if (projector && selectedModel == null) return;
       if (!projector && models.any((item) => item.path == path)) {
@@ -662,10 +750,27 @@ class _ChatScreenState extends State<ChatScreen> {
     if (path == null) return;
     try {
       final owned = await copyIntoApp(path, 'media');
-      setState(() => attachments.add(MediaFrame(owned)));
+      var ready = owned;
+      if (Platform.isIOS) {
+        final destination = '$owned.jpg';
+        try {
+          ready =
+              await const MethodChannel('local_ai_chat/media')
+                  .invokeMethod<String>('prepareImage', {
+                    'source': owned,
+                    'destination': destination,
+                  }) ??
+              (throw StateError('The image converter returned no file.'));
+          await File(owned).delete();
+        } catch (_) {
+          await File(owned).delete();
+          rethrow;
+        }
+      }
+      setState(() => attachments.add(MediaFrame(ready)));
       await save();
     } catch (error) {
-      setState(() => status = 'Image import failed: ' + error.toString());
+      showProblem('Image import failed: $error');
     }
   }
 
@@ -888,9 +993,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 item.text != '[Generation failed]',
           )
           .toList();
-      final recent = history.length > 6
-          ? history.sublist(history.length - 6)
-          : history;
+      // A text-only model cannot inspect previous media. Do not feed it an
+      // earlier vision answer as if it were fresh visual evidence.
+      final recent = textHistorySinceMedia(history);
       for (final item in question.frames.isEmpty ? recent : <ChatEntry>[]) {
         final text = item.text.length > 900
             ? item.text.substring(0, 900)
@@ -898,13 +1003,7 @@ class _ChatScreenState extends State<ChatScreen> {
         input.add(
           LlamaResponseInputItem(
             role: item.role,
-            content: [
-              LlamaTextPart(
-                item.frames.isEmpty
-                    ? text
-                    : '$text [Earlier media was attached; those frames are not part of this request.]',
-              ),
-            ],
+            content: [LlamaTextPart(text)],
           ),
         );
       }
@@ -927,23 +1026,32 @@ class _ChatScreenState extends State<ChatScreen> {
           'active': LlamaModelConfig(
             modelPath: model.path,
             mmprojPath: model.projector,
-            contextSize: model.vision ? 8192 : 4096,
+            contextSize: model.vision ? 4096 : 2048,
             gpuLayerCount: 0,
           ),
         },
       );
       setState(() => status = 'Generating on this device…');
+      var rawReply = '';
       await for (final event in client.responses.stream(
         model: 'active',
         input: input,
-        instructions: model.name.toLowerCase().contains('qwen3')
-            ? '$instructions\n/no_think'
-            : instructions,
+        instructions:
+            '$instructions\nReply to the latest message in your own words. Do not narrate your reasoning or repeat a phrase. Be concise.' +
+            (model.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''),
         maxOutputTokens: maxTokens,
+        temperature: 0.65,
+        topP: 0.90,
       )) {
         if (cancelled) break;
         if (event is LlamaResponseOutputTextDelta) {
-          if (mounted) setState(() => reply.text += event.delta);
+          rawReply += event.delta;
+          final visible = visibleReply(rawReply);
+          if (mounted) setState(() => reply.text = visible);
+          if (isRepeatingReply(visible)) {
+            if (mounted) setState(() => status = 'Stopped a repeating reply.');
+            break;
+          }
         } else if (event is LlamaResponseFailed) {
           throw StateError(event.error.message);
         }
@@ -958,7 +1066,10 @@ class _ChatScreenState extends State<ChatScreen> {
       attachments.insertAll(0, question.frames);
       currentVideoPath = originalVideoPath;
       currentVideoDurationMs = originalVideoDurationMs;
-      showProblem('Local generation failed: $error');
+      final message = error.toString().contains('Failed to load model:')
+          ? 'Could not load ${model.name}. Close other apps and retry; if it keeps failing, remove and download or import that model again. Your draft is saved.'
+          : 'Local generation failed: $error';
+      showProblem(message);
     } finally {
       if (mounted) setState(() => busy = false);
       await save();
@@ -1109,6 +1220,16 @@ class _ChatScreenState extends State<ChatScreen> {
                         icon: const Icon(Icons.download),
                         label: const Text('Get open-ended text model'),
                       ),
+                      OutlinedButton.icon(
+                        onPressed: downloading
+                            ? null
+                            : () async {
+                                await downloadDetailedVisionModel();
+                                update(() {});
+                              },
+                        icon: const Icon(Icons.visibility_outlined),
+                        label: const Text('Get detailed vision model · 3 GB'),
+                      ),
                       if (downloading)
                         TextButton(
                           onPressed: () {
@@ -1198,6 +1319,10 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> showSettings() async {
     final promptController = TextEditingController(text: instructions);
     final speechController = TextEditingController(text: speechRoot ?? '');
+    var selectedCustom = customColor;
+    final colorController = TextEditingController(
+      text: customColor.toARGB32().toRadixString(16).substring(2).toUpperCase(),
+    );
     var count = frameCount;
     var limit = maxTokens;
     var selectedTheme = themeName;
@@ -1217,103 +1342,220 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  TextField(
-                    controller: promptController,
-                    maxLines: 3,
-                    decoration: const InputDecoration(
-                      labelText: 'System instructions',
-                    ),
+                  ExpansionTile(
+                    title: const Text('Chat and video'),
+                    children: [
+                      TextField(
+                        controller: promptController,
+                        maxLines: 3,
+                        decoration: const InputDecoration(
+                          labelText: 'System instructions',
+                        ),
+                      ),
+                      Text('Video frames: ' + count.toString()),
+                      Slider(
+                        value: count.toDouble(),
+                        min: 4,
+                        max: 12,
+                        divisions: 8,
+                        onChanged: (value) =>
+                            update(() => count = value.round()),
+                      ),
+                      Text('Maximum output tokens: ' + limit.toString()),
+                      Slider(
+                        value: limit.toDouble(),
+                        min: 100,
+                        max: 1000,
+                        divisions: 9,
+                        onChanged: (value) =>
+                            update(() => limit = value.round()),
+                      ),
+                    ],
                   ),
-                  Text('Video frames: ' + count.toString()),
-                  Slider(
-                    value: count.toDouble(),
-                    min: 4,
-                    max: 12,
-                    divisions: 8,
-                    onChanged: (value) => update(() => count = value.round()),
+                  ExpansionTile(
+                    title: const Text('Appearance'),
+                    subtitle: Text('$selectedTheme · $selectedStyle'),
+                    children: [
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedTheme,
+                        decoration: const InputDecoration(
+                          labelText: 'Appearance',
+                        ),
+                        items: GlassPalette.presets.keys
+                            .map(
+                              (name) => DropdownMenuItem(
+                                value: name,
+                                child: Text(name),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) => update(() {
+                          selectedTheme = value ?? selectedTheme;
+                          if (selectedTheme == 'Chat Dark')
+                            selectedStyle = 'Quiet';
+                          if (selectedTheme != 'Chat Dark' &&
+                              selectedStyle == 'Quiet') {
+                            selectedStyle = 'Waves';
+                          }
+                        }),
+                      ),
+                      if (selectedTheme == 'Custom') ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                color: selectedCustom,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: TextField(
+                                controller: colorController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Custom color (hex)',
+                                  prefixText: '#',
+                                ),
+                                maxLength: 6,
+                                onChanged: (value) {
+                                  if (RegExp(r'^[0-9a-fA-F]{6}$')
+                                      .hasMatch(value)) {
+                                    update(
+                                      () => selectedCustom = Color(
+                                        0xFF000000 |
+                                            int.parse(value, radix: 16),
+                                      ),
+                                    );
+                                  }
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          'Hue ${HSLColor.fromColor(selectedCustom).hue.round()}°',
+                        ),
+                        Slider(
+                          value: HSLColor.fromColor(selectedCustom).hue,
+                          min: 0,
+                          max: 360,
+                          onChanged: (value) => update(() {
+                            selectedCustom = HSLColor.fromColor(selectedCustom)
+                                .withHue(value)
+                                .toColor();
+                            colorController.text = selectedCustom
+                                .toARGB32()
+                                .toRadixString(16)
+                                .substring(2)
+                                .toUpperCase();
+                          }),
+                        ),
+                        const Text('Brightness'),
+                        Slider(
+                          value: HSLColor.fromColor(selectedCustom).lightness,
+                          min: 0.30,
+                          max: 0.85,
+                          onChanged: (value) => update(() {
+                            selectedCustom = HSLColor.fromColor(selectedCustom)
+                                .withLightness(value)
+                                .toColor();
+                            colorController.text = selectedCustom
+                                .toARGB32()
+                                .toRadixString(16)
+                                .substring(2)
+                                .toUpperCase();
+                          }),
+                        ),
+                      ],
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedStyle,
+                        decoration: const InputDecoration(
+                          labelText: 'Background',
+                        ),
+                        items:
+                            [
+                                  'Waves',
+                                  'Ribbons',
+                                  'Orbit',
+                                  'Pulse',
+                                  'Nebula',
+                                  'Starfield',
+                                  'Mesh',
+                                  'Quiet',
+                                ]
+                                .map(
+                                  (name) => DropdownMenuItem(
+                                    value: name,
+                                    child: Text(name),
+                                  ),
+                                )
+                                .toList(),
+                        onChanged: (value) => update(
+                          () => selectedStyle = value ?? selectedStyle,
+                        ),
+                      ),
+                      SwitchListTile(
+                        title: const Text('Motion'),
+                        value: animated,
+                        onChanged: (value) => update(() => animated = value),
+                      ),
+                      Text('Motion speed: ' + speed.toStringAsFixed(1) + '×'),
+                      Slider(
+                        value: speed,
+                        min: 0.2,
+                        max: 3.0,
+                        divisions: 28,
+                        onChanged: (value) => update(() => speed = value),
+                      ),
+                    ],
                   ),
-                  Text('Maximum output tokens: ' + limit.toString()),
-                  Slider(
-                    value: limit.toDouble(),
-                    min: 100,
-                    max: 1000,
-                    divisions: 9,
-                    onChanged: (value) => update(() => limit = value.round()),
-                  ),
-                  DropdownButtonFormField<String>(
-                    initialValue: selectedTheme,
-                    decoration: const InputDecoration(labelText: 'Appearance'),
-                    items: GlassPalette.presets.keys
-                        .map(
-                          (name) =>
-                              DropdownMenuItem(value: name, child: Text(name)),
-                        )
-                        .toList(),
-                    onChanged: (value) =>
-                        update(() => selectedTheme = value ?? selectedTheme),
-                  ),
-                  DropdownButtonFormField<String>(
-                    initialValue: selectedStyle,
-                    decoration: const InputDecoration(labelText: 'Background'),
-                    items: ['Waves', 'Ribbons', 'Orbit', 'Pulse']
-                        .map(
-                          (name) =>
-                              DropdownMenuItem(value: name, child: Text(name)),
-                        )
-                        .toList(),
-                    onChanged: (value) =>
-                        update(() => selectedStyle = value ?? selectedStyle),
-                  ),
-                  SwitchListTile(
-                    title: const Text('Motion'),
-                    value: animated,
-                    onChanged: (value) => update(() => animated = value),
-                  ),
-                  Text('Motion speed: ' + speed.toStringAsFixed(1) + '×'),
-                  Slider(
-                    value: speed,
-                    min: 0.2,
-                    max: 3.0,
-                    divisions: 28,
-                    onChanged: (value) => update(() => speed = value),
-                  ),
-                  TextField(
-                    controller: speechController,
-                    decoration: const InputDecoration(
-                      labelText: 'Offline speech model folder',
-                    ),
-                  ),
-                  TextButton.icon(
-                    onPressed: () async {
-                      final folder = await FilePicker.platform
-                          .getDirectoryPath();
-                      if (folder != null)
-                        update(() => speechController.text = folder);
-                    },
-                    icon: const Icon(Icons.folder_open),
-                    label: const Text('Choose speech folder'),
-                  ),
-                  TextButton.icon(
-                    onPressed: downloadingSpeech
-                        ? null
-                        : () {
-                            speechRoot = speechController.text.trim();
-                            if (speechRoot == null || speechRoot!.isEmpty)
-                              return;
-                            final previous = speech;
-                            speech = SpeechService(speechRoot!);
-                            if (previous != null) unawaited(previous.dispose());
-                            unawaited(save());
-                            Navigator.pop(context);
-                            unawaited(downloadSpeechModels());
-                          },
-                    icon: const Icon(Icons.download),
-                    label: const Text('Download offline voice models'),
-                  ),
-                  SwitchListTile(
-                    title: const Text('Speak voice replies'),
-                    value: spokenReplies,
-                    onChanged: (value) => update(() => spokenReplies = value),
+                  ExpansionTile(
+                    title: const Text('Voice'),
+                    children: [
+                      TextField(
+                        controller: speechController,
+                        decoration: const InputDecoration(
+                          labelText: 'Offline speech model folder',
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: () async {
+                          final folder = await FilePicker.platform
+                              .getDirectoryPath();
+                          if (folder != null)
+                            update(() => speechController.text = folder);
+                        },
+                        icon: const Icon(Icons.folder_open),
+                        label: const Text('Choose speech folder'),
+                      ),
+                      TextButton.icon(
+                        onPressed: downloadingSpeech
+                            ? null
+                            : () {
+                                speechRoot = speechController.text.trim();
+                                if (speechRoot == null || speechRoot!.isEmpty)
+                                  return;
+                                final previous = speech;
+                                speech = SpeechService(speechRoot!);
+                                if (previous != null)
+                                  unawaited(previous.dispose());
+                                unawaited(save());
+                                Navigator.pop(context);
+                                unawaited(downloadSpeechModels());
+                              },
+                        icon: const Icon(Icons.download),
+                        label: const Text('Download offline voice models'),
+                      ),
+                      SwitchListTile(
+                        title: const Text('Speak voice replies'),
+                        value: spokenReplies,
+                        onChanged: (value) =>
+                            update(() => spokenReplies = value),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -1331,6 +1573,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 maxTokens = limit;
                 setState(() {
                   themeName = selectedTheme;
+                  customColor = selectedCustom;
                   backgroundStyle = selectedStyle;
                   motion = animated;
                   motionSpeed = speed;
@@ -1353,6 +1596,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     promptController.dispose();
     speechController.dispose();
+    colorController.dispose();
   }
 
   Widget messageBubble(ChatEntry entry) => Align(
@@ -1393,10 +1637,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = GlassPalette.presets[themeName]!;
+    final palette = GlassPalette.resolve(themeName, customColor);
     final light = palette.text.computeLuminance() < 0.5;
     return GlassDesign(
       themeName: themeName,
+      customColor: customColor,
       motion: motion,
       speed: motionSpeed,
       backgroundStyle: backgroundStyle,

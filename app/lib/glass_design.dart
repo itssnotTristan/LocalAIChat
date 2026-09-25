@@ -21,6 +21,13 @@ class GlassPalette {
   final Color text;
 
   static const presets = <String, GlassPalette>{
+    'Chat Dark': GlassPalette(
+      Color(0xFF171717),
+      Color(0xFF212121),
+      Color(0xFFE8E8E8),
+      Color(0xFF777777),
+      Color(0xFFF3F3F3),
+    ),
     'Aurora': GlassPalette(
       Color(0xFF070F29),
       Color(0xFF0B2B53),
@@ -63,7 +70,53 @@ class GlassPalette {
       Color(0xFFFF86C5),
       Color(0xFFF9FBFF),
     ),
+    'Emerald': GlassPalette(
+      Color(0xFF071B19),
+      Color(0xFF11443A),
+      Color(0xFF83E5BC),
+      Color(0xFF74BFE1),
+      Color(0xFFF4FFFA),
+    ),
+    'Rose': GlassPalette(
+      Color(0xFF200F21),
+      Color(0xFF572944),
+      Color(0xFFFFAFC9),
+      Color(0xFFD9A5FF),
+      Color(0xFFFFF7FB),
+    ),
+    'Solar': GlassPalette(
+      Color(0xFF21170E),
+      Color(0xFF594126),
+      Color(0xFFFFD084),
+      Color(0xFFFF8C72),
+      Color(0xFFFFFAF0),
+    ),
+    'Custom': GlassPalette(
+      Color(0xFF071625),
+      Color(0xFF19324B),
+      Color(0xFF55C8FF),
+      Color(0xFF95E5FF),
+      Color(0xFFFFFFFF),
+    ),
   };
+
+  static GlassPalette resolve(String name, Color customColor) {
+    if (name != 'Custom') return presets[name] ?? presets['Aurora']!;
+    final hsl = HSLColor.fromColor(customColor);
+    return GlassPalette(
+      hsl
+          .withLightness(0.10)
+          .withSaturation((hsl.saturation * 0.65).clamp(0.15, 0.7))
+          .toColor(),
+      hsl
+          .withLightness(0.23)
+          .withSaturation((hsl.saturation * 0.78).clamp(0.18, 0.8))
+          .toColor(),
+      hsl.withLightness(hsl.lightness.clamp(0.52, 0.76)).toColor(),
+      hsl.withHue((hsl.hue + 36) % 360).withLightness(0.70).toColor(),
+      const Color(0xFFF7FBFF),
+    );
+  }
 }
 
 class GlassSurface extends StatelessWidget {
@@ -78,15 +131,21 @@ class GlassSurface extends StatelessWidget {
   final double radius;
   @override
   Widget build(BuildContext context) {
-    final palette = GlassPalette.presets[GlassDesign.of(context).themeName]!;
+    final design = GlassDesign.of(context);
+    final palette = GlassPalette.resolve(design.themeName, design.customColor);
     final light = palette.text.computeLuminance() < 0.5;
+    final quiet = design.themeName == 'Chat Dark';
     return Container(
       padding: padding,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(radius),
         border: Border.all(
           color: (light ? Colors.white : palette.text).withValues(
-            alpha: light ? 0.72 : 0.29,
+            alpha: light
+                ? 0.72
+                : quiet
+                ? 0.12
+                : 0.29,
           ),
         ),
         gradient: LinearGradient(
@@ -94,7 +153,11 @@ class GlassSurface extends StatelessWidget {
           end: Alignment.bottomRight,
           colors: [
             (light ? Colors.white : palette.accent).withValues(
-              alpha: light ? 0.40 : 0.18,
+              alpha: light
+                  ? 0.40
+                  : quiet
+                  ? 0.07
+                  : 0.18,
             ),
             palette.base2.withValues(alpha: light ? 0.34 : 0.70),
           ],
@@ -115,6 +178,7 @@ class GlassSurface extends StatelessWidget {
 class GlassDesign extends InheritedWidget {
   const GlassDesign({
     required this.themeName,
+    required this.customColor,
     required this.motion,
     required this.speed,
     required this.backgroundStyle,
@@ -122,6 +186,7 @@ class GlassDesign extends InheritedWidget {
     super.key,
   });
   final String themeName;
+  final Color customColor;
   final bool motion;
   final double speed;
   final String backgroundStyle;
@@ -130,6 +195,7 @@ class GlassDesign extends InheritedWidget {
   @override
   bool updateShouldNotify(GlassDesign oldWidget) =>
       themeName != oldWidget.themeName ||
+      customColor != oldWidget.customColor ||
       motion != oldWidget.motion ||
       speed != oldWidget.speed ||
       backgroundStyle != oldWidget.backgroundStyle;
@@ -165,7 +231,7 @@ class _GlassBackgroundState extends State<GlassBackground> {
   @override
   Widget build(BuildContext context) {
     final design = GlassDesign.of(context);
-    final palette = GlassPalette.presets[design.themeName]!;
+    final palette = GlassPalette.resolve(design.themeName, design.customColor);
     final rainbow = design.themeName == 'Rainbow';
     final shift = rainbow ? tick * 0.18 : 0.0;
     final accent = rainbow
@@ -208,6 +274,7 @@ class _AtmospherePainter extends CustomPainter {
           colors: [palette.base, palette.base2, palette.base],
         ).createShader(bounds),
     );
+    if (style == 'Quiet') return;
     final glow = Paint()
       ..shader =
           RadialGradient(
@@ -222,7 +289,58 @@ class _AtmospherePainter extends CustomPainter {
             ),
           );
     canvas.drawRect(bounds, glow);
-    if (style == 'Orbit') {
+    if (style == 'Nebula') {
+      for (var i = 0; i < 4; i++) {
+        final center = Offset(
+          size.width * (0.15 + i * 0.23 + 0.06 * math.sin(tick * 0.3 + i)),
+          size.height *
+              (0.22 + (i % 2) * 0.46 + 0.05 * math.cos(tick * 0.4 + i)),
+        );
+        final radius = size.shortestSide * (0.34 + i * 0.08);
+        canvas.drawCircle(
+          center,
+          radius,
+          Paint()
+            ..shader = RadialGradient(
+              colors: [
+                (i.isEven ? accent : palette.accent2).withValues(alpha: 0.15),
+                Colors.transparent,
+              ],
+            ).createShader(Rect.fromCircle(center: center, radius: radius)),
+        );
+      }
+    } else if (style == 'Starfield') {
+      for (var i = 0; i < 90; i++) {
+        final x = ((i * 0.61803398875 + 0.11) % 1) * size.width;
+        final y = ((i * 0.38196601125 + 0.37) % 1) * size.height;
+        final pulse = 0.5 + 0.5 * math.sin(tick * 0.8 + i * 1.7);
+        canvas.drawCircle(
+          Offset(x, y),
+          i % 8 == 0 ? 1.8 : 0.8,
+          Paint()..color = accent.withValues(alpha: 0.12 + pulse * 0.34),
+        );
+      }
+    } else if (style == 'Mesh') {
+      final spacing = math.max(38.0, size.shortestSide / 12);
+      for (var row = 0; row * spacing < size.height + spacing; row++) {
+        final path = Path();
+        for (var x = 0.0; x <= size.width + 12; x += 12) {
+          final y = row * spacing + 10 * math.sin(x / 90 + tick * 0.4 + row);
+          if (x == 0) {
+            path.moveTo(x, y);
+          } else {
+            path.lineTo(x, y);
+          }
+        }
+        canvas.drawPath(
+          path,
+          Paint()
+            ..color = accent.withValues(alpha: 0.09)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1,
+        );
+      }
+    } else if (style == 'Orbit') {
       for (var i = 0; i < 5; i++) {
         final path = Path();
         final center = Offset(

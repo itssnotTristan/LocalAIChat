@@ -60,7 +60,7 @@ final class LibLlamaCpp implements LlamaEngine {
         }
       }
     } finally {
-      actor.close();
+      await actor.close();
     }
   }
 }

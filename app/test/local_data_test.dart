@@ -18,4 +18,19 @@ void main() {
     );
     expect(restored.entries.last.text, 'A red car appears.');
   });
+
+  test('text history drops an old video caption but keeps new chat', () {
+    final history = [
+      ChatEntry('user', 'How are you?'),
+      ChatEntry('assistant', 'Good.'),
+      ChatEntry('user', 'Describe this clip', [MediaFrame('frame.jpg', 1500)]),
+      ChatEntry('assistant', 'A mistaken scene description.'),
+      ChatEntry('user', 'My card is green.'),
+      ChatEntry('assistant', 'Okay, green.'),
+    ];
+    expect(textHistorySinceMedia(history).map((entry) => entry.text), [
+      'My card is green.',
+      'Okay, green.',
+    ]);
+  });
 }

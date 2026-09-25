@@ -11,6 +11,56 @@ import 'speech_service.dart';
 import 'video_duration.dart';
 import 'video_sampler.dart';
 
+Future<void> runVisionProbe(List<String> args) async {
+  if (args.length < 5) throw ArgumentError('Missing vision probe arguments.');
+  final report = File(args[1]);
+  await report.parent.create(recursive: true);
+  final client = LlamaOpenAIClient(
+    models: {
+      'probe': LlamaModelConfig(
+        modelPath: args[2],
+        mmprojPath: args[3],
+        contextSize: 4096,
+        gpuLayerCount: 0,
+      ),
+    },
+  );
+  final answer = StringBuffer();
+  try {
+    await for (final event in client.responses.stream(
+      model: 'probe',
+      input: [
+        LlamaResponseInputItem(
+          role: 'user',
+          content: [
+            LlamaTextPart(
+              args.length > 5
+                  ? args.skip(5).join(' ')
+                  : 'Describe the image directly.',
+            ),
+            LlamaImageFilePart(path: args[4]),
+          ],
+        ),
+      ],
+      instructions:
+          'Describe only what is visible, using plain language. /no_think',
+      maxOutputTokens: 180,
+      temperature: 0.65,
+      topP: 0.90,
+    )) {
+      if (event is LlamaResponseOutputTextDelta) answer.write(event.delta);
+      if (event is LlamaResponseFailed) throw StateError(event.error.message);
+    }
+    await report.writeAsString(
+      jsonEncode({'ok': true, 'answer': answer.toString()}),
+    );
+  } catch (error) {
+    await report.writeAsString(
+      jsonEncode({'ok': false, 'error': error.toString()}),
+    );
+  }
+}
+
 Future<void> runTextSelfTest(List<String> args) async {
   final report = File(
     args.length > 1 ? args[1] : 'D:/LocalAIChat/self-test-text.json',

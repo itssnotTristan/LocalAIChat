@@ -26,6 +26,14 @@ class ModelDownloader {
   static const adultTextName = 'Qwen2.5-1.5B-Instruct-abliterated.Q4_K_M.gguf';
   static const adultTextSha256 =
       '59aa9f44bde5349dbe292d7024d197db605f422b8baf65f3246a59abbde4e8e9';
+  static const detailedVisionUrl =
+      'https://huggingface.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF/resolve/main/';
+  static const detailedVisionName = 'Qwen3.5-4B-Uncensored.Q4_K_M.gguf';
+  static const detailedProjectorName = 'Qwen3.5-4B-Uncensored.mmproj-Q8_0.gguf';
+  static const detailedVisionSha256 =
+      'f3a2e8f1837f52247a5b7b28f379923c98cc38fa8b339a943ba49b518be8b562';
+  static const detailedProjectorSha256 =
+      '04a3af332afa255093f04b1a95ae1065637c140b8b365f721f0be89b62ae2d16';
 
   void cancel() {
     _cancelled = true;
@@ -76,6 +84,36 @@ class ModelDownloader {
         onProgress,
         baseUrl: adultTextUrl,
       );
+    } finally {
+      _client?.close();
+      _client = null;
+    }
+  }
+
+  Future<StarterModelFiles> downloadDetailedVision(
+    String directory,
+    void Function(String name, int received, int? total) onProgress,
+  ) async {
+    _cancelled = false;
+    _client = HttpClient();
+    final folder = Directory(directory);
+    await folder.create(recursive: true);
+    try {
+      final model = await _downloadOne(
+        folder,
+        detailedVisionName,
+        detailedVisionSha256,
+        onProgress,
+        baseUrl: detailedVisionUrl,
+      );
+      final projector = await _downloadOne(
+        folder,
+        detailedProjectorName,
+        detailedProjectorSha256,
+        onProgress,
+        baseUrl: detailedVisionUrl,
+      );
+      return StarterModelFiles(model, projector);
     } finally {
       _client?.close();
       _client = null;

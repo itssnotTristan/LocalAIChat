@@ -23,6 +23,7 @@ final class InferenceIsolate {
   final Map<int, StreamController<LlamaResponse>> _pending = {};
   var _nextRequestId = 0;
   var _isClosed = false;
+  final Completer<void> _shutdownAcknowledged = Completer<void>();
 
   static Future<InferenceIsolate> spawn({
     required LlamaCppLibraryDescriptor library,
@@ -34,6 +35,12 @@ final class InferenceIsolate {
     late final InferenceIsolate actor;
 
     subscription = receivePort.listen((message) {
+      if (message is _ShutdownAcknowledged) {
+        if (!actor._shutdownAcknowledged.isCompleted) {
+          actor._shutdownAcknowledged.complete();
+        }
+        return;
+      }
       if (message is SendPort) {
         ready.complete(message);
         return;
@@ -87,7 +94,7 @@ final class InferenceIsolate {
     return controller.stream;
   }
 
-  void close() {
+  Future<void> close() async {
     if (_isClosed) {
       return;
     }
@@ -97,8 +104,14 @@ final class InferenceIsolate {
       unawaited(controller.close());
     }
     _pending.clear();
-    unawaited(_subscription.cancel());
-    _isolate.kill(priority: Isolate.immediate);
+    try {
+      await _shutdownAcknowledged.future.timeout(const Duration(seconds: 8));
+    } on TimeoutException {
+      // A native generation can be stuck; keep the UI responsive in that case.
+    } finally {
+      await _subscription.cancel();
+      _isolate.kill(priority: Isolate.immediate);
+    }
   }
 }
 
@@ -137,6 +150,10 @@ final class _ShutdownMessage {
   const _ShutdownMessage();
 }
 
+final class _ShutdownAcknowledged {
+  const _ShutdownAcknowledged();
+}
+
 void _runInferenceWorker(_StartMessage start) {
   var state = start.initialState;
   NativeLlamaRuntime? runtime;
@@ -165,6 +182,7 @@ void _runInferenceWorker(_StartMessage start) {
   receivePort.listen((message) {
     if (message is _ShutdownMessage) {
       runtime?.close();
+      start.replyPort.send(const _ShutdownAcknowledged());
       receivePort.close();
       return;
     }
