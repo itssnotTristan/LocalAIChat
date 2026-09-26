@@ -10,8 +10,9 @@ An offline Flutter chat app for Windows and iOS. The app stores chats and import
 4. Open the conversation menu for a personality and saved memory. The app keeps recent chat context and also saves facts entered as **Remember that …** or **Correction: …**. You can edit memory directly. Each conversation has its own memory and personality.
 5. Delete a message from its **…** menu or delete an entire conversation from the sidebar menu. App-owned images and sampled frames are removed when no other message uses them.
 6. The microphone button records local speech. The call button starts a hands-free local listen/reply/speak loop. Choose among three male and two female offline voices in **Settings > Voice** after downloading the voice pack. Fish Audio can optionally speak replies using a pasted voice link or ID and a securely stored API key; only reply text is sent to Fish when that source is selected.
+7. **Settings > Appearance** has glass palettes, Chat Dark, custom colors, animated ribbons, a dense twinkling Starfield, and moving Northern Lights. Starfield and Northern Lights each reveal a separate color control when selected.
 
-The small vision model can misinterpret scenes. Only selected frames are passed to it, and it does not listen to video audio. Check the selected frames before relying on a description. An immediate correction or request to review the media reuses the selected frames; unrelated chat does not. An error keeps the draft and attachments available for retry.
+The small vision model can misinterpret scenes. Only selected frames are passed to it, and it does not listen to video audio. Check the selected frames before relying on a description. The prompt asks for visible details only, and a repeated sentence pattern is cut off before it fills the reply. This reduces runaway hallucinations but does not guarantee factual accuracy. An immediate correction or request to review the media reuses the selected frames; unrelated chat does not. An error keeps the draft and attachments available for retry.
 
 ## Build from source
 

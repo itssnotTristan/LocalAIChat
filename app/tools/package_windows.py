@@ -33,7 +33,7 @@ def main() -> int:
     parser.add_argument("--models", type=Path, required=True)
     parser.add_argument("--speech", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--version", default="0.3.0")
+    parser.add_argument("--version", default="0.3.1")
     args = parser.parse_args()
 
     release = args.release.resolve()
