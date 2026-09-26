@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'model_download.dart';
 import 'image_studio_install.dart';
+import 'speech_download.dart';
 
 class BackgroundModelFile {
   const BackgroundModelFile(
@@ -126,7 +127,24 @@ class BackgroundTransferStatus {
 class BackgroundModelDownloads {
   static const _channel = MethodChannel('local_ai_chat/model_transfers');
   static const imageArchiveTaskId = 'image-realistic-vision-5.1';
+  static const speechAsrTaskId = 'voice-moonshine-asr';
+  static const speechTtsTaskId = 'voice-kokoro-tts';
   final _verifiedPaths = <String>{};
+
+  static const _speechArchives = <(String, String, String, String)>[
+    (
+      speechAsrTaskId,
+      SpeechDownloader.asrArchiveName,
+      SpeechDownloader.asrUrl,
+      SpeechDownloader.asrSha256,
+    ),
+    (
+      speechTtsTaskId,
+      SpeechDownloader.ttsArchiveName,
+      SpeechDownloader.ttsUrl,
+      SpeechDownloader.ttsSha256,
+    ),
+  ];
 
   String taskId(BackgroundModelPack pack, BackgroundModelFile file) =>
       '${pack.id}-${file.name}';
@@ -140,6 +158,68 @@ class BackgroundModelDownloads {
       'destination': '$root/coreml/realistic-vision-5.1.zip.part',
       'expected': 916522756,
     });
+  }
+
+  Future<void> queueSpeechArchives(String root) async {
+    if (!Platform.isIOS) throw UnsupportedError('Background models need iOS.');
+    await Directory(root).create(recursive: true);
+    for (final (id, name, url, expectedSha) in _speechArchives) {
+      final archive = File('$root/$name');
+      if (await archive.exists() &&
+          (await sha256.bind(archive.openRead()).first).toString() ==
+              expectedSha) {
+        _verifiedPaths.add(archive.path);
+        continue;
+      }
+      await _channel.invokeMethod<void>('start', {
+        'id': id,
+        'url': url,
+        'destination': '${archive.path}.part',
+        'expected': 0,
+      });
+    }
+  }
+
+  Future<bool> finalizeSpeechArchives(
+    String root,
+    List<BackgroundTransferStatus> statuses,
+  ) async {
+    final byId = {for (final state in statuses) state.id: state};
+    if (!_speechArchives.any((archive) => byId.containsKey(archive.$1))) {
+      return false;
+    }
+    for (final (id, name, _, expectedSha) in _speechArchives) {
+      final archive = File('$root/$name');
+      final partial = File('${archive.path}.part');
+      final state = byId[id];
+      if (state != null &&
+          state.state != 'downloaded' &&
+          !_verifiedPaths.contains(archive.path))
+        return false;
+      final candidate = await partial.exists() ? partial : archive;
+      if (!await candidate.exists()) return false;
+      if (!_verifiedPaths.contains(candidate.path)) {
+        final actual = (await sha256.bind(candidate.openRead()).first)
+            .toString();
+        if (actual != expectedSha) {
+          await candidate.delete();
+          await forgetId(id);
+          throw StateError('$name failed SHA-256. Retry the voice pack.');
+        }
+        _verifiedPaths.add(candidate.path);
+      }
+      if (candidate.path == partial.path) {
+        if (await archive.exists()) await archive.delete();
+        await partial.rename(archive.path);
+        _verifiedPaths.add(archive.path);
+      }
+    }
+    return true;
+  }
+
+  Future<void> forgetSpeechArchives() async {
+    await forgetId(speechAsrTaskId);
+    await forgetId(speechTtsTaskId);
   }
 
   Future<void> queue(String root, BackgroundModelPack pack) async {

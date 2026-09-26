@@ -32,6 +32,7 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       BackgroundModelDownloads();
   Timer? imageDownloadPoll;
   bool imageArchiveReady = false;
+  bool imageDownloadRunning = false;
   String imageDownloadStatus = '';
   List<InstalledImageModel> models = [];
   String? selectedModelId;
@@ -68,6 +69,7 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       if (!mounted) return;
       setState(() {
         imageArchiveReady = matching?.state == 'downloaded';
+        imageDownloadRunning = matching?.state == 'downloading';
         imageDownloadStatus = switch (matching?.state) {
           'downloading' =>
             'Image model downloading in background · ${(matching!.received / 1048576).round()} MiB',
@@ -92,6 +94,14 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
     } catch (error) {
       if (mounted) setState(() => status = 'Image download failed: $error');
     }
+  }
+
+  Future<void> cancelImageDownload() async {
+    await backgroundDownloads.cancel(
+      BackgroundModelDownloads.imageArchiveTaskId,
+    );
+    await pollImageDownload();
+    if (mounted) setState(() => status = 'Image model download cancelled.');
   }
 
   Future<void> refreshModels() async {
@@ -447,7 +457,7 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
                           runSpacing: 8,
                           children: [
                             OutlinedButton.icon(
-                              onPressed: installing
+                              onPressed: installing || imageDownloadRunning
                                   ? null
                                   : Platform.isIOS &&
                                         !imageArchiveReady &&
@@ -465,6 +475,11 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
                                     : 'Download image model in background',
                               ),
                             ),
+                            if (imageDownloadRunning)
+                              TextButton(
+                                onPressed: cancelImageDownload,
+                                child: const Text('Cancel image download'),
+                              ),
                             OutlinedButton.icon(
                               onPressed: installing || editing
                                   ? null

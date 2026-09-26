@@ -12,14 +12,16 @@ class SpeechDownloader {
   HttpClient? _client;
   bool _cancelled = false;
 
-  static const _asrUrl =
+  static const asrUrl =
       'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-int8.tar.bz2';
-  static const _ttsUrl =
+  static const ttsUrl =
       'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2';
-  static const _asrSha =
+  static const asrSha256 =
       'd5fe6ec4334fef36255b2a4010412cad4c007e33103fec62fb5d17cad88086f2';
-  static const _ttsSha =
+  static const ttsSha256 =
       '912804855a04745fa77a30be545b3f9a5d15c4d66db00b88cbcd4921df605ac7';
+  static const asrArchiveName = 'moonshine-tiny-en-int8.tar.bz2';
+  static const ttsArchiveName = 'kokoro-en-v0_19.tar.bz2';
 
   void cancel() {
     _cancelled = true;
@@ -38,16 +40,16 @@ class SpeechDownloader {
     try {
       final asr = await _file(
         directory,
-        'moonshine-tiny-en-int8.tar.bz2',
-        _asrUrl,
-        _asrSha,
+        asrArchiveName,
+        asrUrl,
+        asrSha256,
         progress,
       );
       final tts = await _file(
         directory,
-        'kokoro-en-v0_19.tar.bz2',
-        _ttsUrl,
-        _ttsSha,
+        ttsArchiveName,
+        ttsUrl,
+        ttsSha256,
         progress,
       );
       if (_cancelled)
@@ -82,6 +84,10 @@ class SpeechDownloader {
       throw StateError('Existing $name has an unexpected checksum.');
     }
     final partial = File(file.path + '.part');
+    if (await partial.exists() && await _digest(partial) == expectedSha) {
+      await partial.rename(file.path);
+      return file.path;
+    }
     var offset = await partial.exists() ? await partial.length() : 0;
     final request = await _client!.getUrl(Uri.parse(url));
     if (offset > 0)

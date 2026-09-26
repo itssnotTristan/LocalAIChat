@@ -634,7 +634,25 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         if (mounted)
           setState(() => status = '${pack.name} is ready on this iPhone.');
       }
-      if (ready.isNotEmpty && mounted) {
+      var speechReady = false;
+      if (speechRoot != null &&
+          await backgroundDownloads.finalizeSpeechArchives(
+            speechRoot!,
+            states,
+          )) {
+        if (!await SpeechService.hasModels(speechRoot!)) {
+          if (mounted)
+            setState(() => status = 'Installing offline voice pack…');
+          await speechDownloader.download(speechRoot!, (name, received, total) {
+            if (mounted) setState(() => status = name);
+          });
+        }
+        await backgroundDownloads.forgetSpeechArchives();
+        speechReady = true;
+        if (mounted)
+          setState(() => status = 'Offline speech and voice are ready.');
+      }
+      if ((ready.isNotEmpty || speechReady) && mounted) {
         backgroundTransfers.value = await backgroundDownloads.statuses();
       }
     } catch (error) {
@@ -889,6 +907,28 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> downloadSpeechModels() async {
     final root = speechRoot;
     if (root == null || downloadingSpeech) return;
+    if (Platform.isIOS) {
+      try {
+        if (await SpeechService.hasModels(root)) {
+          if (mounted)
+            setState(
+              () => status = 'Offline speech and voice are already ready.',
+            );
+          return;
+        }
+        await backgroundDownloads.queueSpeechArchives(root);
+        if (mounted) {
+          setState(
+            () => status =
+                'Offline speech and voice are downloading in the background.',
+          );
+        }
+        await syncBackgroundDownloads();
+      } catch (error) {
+        if (mounted) showProblem('Could not queue voice pack: $error');
+      }
+      return;
+    }
     setState(() {
       downloadingSpeech = true;
       status = 'Downloading offline speech models…';

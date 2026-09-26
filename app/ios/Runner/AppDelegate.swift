@@ -4,6 +4,7 @@ import AVFoundation
 
 private struct ModelTransferRecord: Codable {
   var id: String
+  var generation: String?
   var url: String
   var destination: String
   var state: String
@@ -64,12 +65,13 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
         result(FlutterError(code: "download_path", message: "Model must be saved in the app.", details: nil))
         return
       }
+      let generation = UUID().uuidString
       let alreadyStarted = synchronized { () -> Bool in
         if let existing = records[id],
            existing.state == "downloading" || existing.state == "downloaded" {
           return true
         }
-        records[id] = ModelTransferRecord(id: id, url: source,
+        records[id] = ModelTransferRecord(id: id, generation: generation, url: source,
           destination: target, state: "downloading", received: 0,
           expected: (args["expected"] as? NSNumber)?.int64Value ?? 0,
           error: nil)
@@ -78,7 +80,7 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
       }
       if !alreadyStarted {
         let task = session.downloadTask(with: url)
-        task.taskDescription = id
+        task.taskDescription = "\(id)|\(generation)"
         task.resume()
       }
       result(nil)
@@ -88,7 +90,8 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
         let values = self.synchronized { () -> [[String: Any]] in
           self.records.values.sorted { $0.id < $1.id }.map { record in
             var value = record.dictionary
-            if let task = tasks.first(where: { $0.taskDescription == record.id }),
+            if let task = tasks.first(where: {
+                 $0.taskDescription == self.description(for: record) }),
                record.state == "downloading" {
               value["received"] = max(0, task.countOfBytesReceived)
               if task.countOfBytesExpectedToReceive > 0 {
@@ -106,8 +109,15 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
         return
       }
       session.getAllTasks { [weak self] tasks in
-        tasks.filter { $0.taskDescription == id }.forEach { $0.cancel() }
-        self?.update(id) { $0.state = "cancelled" }
+        guard let self else {
+          DispatchQueue.main.async { result(nil) }
+          return
+        }
+        let description = self.synchronized {
+          self.records[id].map { self.description(for: $0) }
+        }
+        tasks.filter { $0.taskDescription == description }.forEach { $0.cancel() }
+        self.update(id) { $0.state = "cancelled" }
         DispatchQueue.main.async { result(nil) }
       }
     case "forget":
@@ -124,13 +134,17 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
 
   func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                   didFinishDownloadingTo location: URL) {
-    guard let id = downloadTask.taskDescription else { return }
+    guard let (id, generation) = identity(of: downloadTask),
+          synchronized({ records[id]?.generation == generation }) else { return }
     guard let response = downloadTask.response as? HTTPURLResponse,
           (200...299).contains(response.statusCode) else {
-      update(id) { $0.state = "failed"; $0.error = "Server rejected the download." }
+      update(id, generation: generation, requireGenerationMatch: true) {
+        $0.state = "failed"; $0.error = "Server rejected the download." }
       return
     }
-    guard let destination = synchronized({ records[id]?.destination }) else { return }
+    guard let destination = synchronized({
+      records[id]?.generation == generation ? records[id]?.destination : nil
+    }) else { return }
     do {
       let target = URL(fileURLWithPath: destination)
       try FileManager.default.createDirectory(at: target.deletingLastPathComponent(),
@@ -140,16 +154,18 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
       }
       try FileManager.default.moveItem(at: location, to: target)
       let bytes = (try FileManager.default.attributesOfItem(atPath: target.path)[.size] as? NSNumber)?.int64Value ?? 0
-      update(id) { $0.state = "downloaded"; $0.received = bytes; $0.error = nil }
+      update(id, generation: generation, requireGenerationMatch: true) {
+        $0.state = "downloaded"; $0.received = bytes; $0.error = nil }
     } catch {
-      update(id) { $0.state = "failed"; $0.error = error.localizedDescription }
+      update(id, generation: generation, requireGenerationMatch: true) {
+        $0.state = "failed"; $0.error = error.localizedDescription }
     }
   }
 
   func urlSession(_ session: URLSession, task: URLSessionTask,
                   didCompleteWithError error: Error?) {
-    guard let id = task.taskDescription, let error else { return }
-    update(id) {
+    guard let (id, generation) = identity(of: task), let error else { return }
+    update(id, generation: generation, requireGenerationMatch: true) {
       if $0.state != "downloaded" && $0.state != "cancelled" {
         $0.state = "failed"
         $0.error = error.localizedDescription
@@ -166,9 +182,26 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
     if let completion { DispatchQueue.main.async(execute: completion) }
   }
 
-  private func update(_ id: String, change: (inout ModelTransferRecord) -> Void) {
+  private func description(for record: ModelTransferRecord) -> String {
+    guard let generation = record.generation else { return record.id }
+    return "\(record.id)|\(generation)"
+  }
+
+  private func identity(of task: URLSessionTask) -> (String, String?)? {
+    guard let description = task.taskDescription else { return nil }
+    guard let separator = description.firstIndex(of: "|") else {
+      return (description, nil)
+    }
+    return (String(description[..<separator]),
+            String(description[description.index(after: separator)...]))
+  }
+
+  private func update(_ id: String, generation: String? = nil,
+                      requireGenerationMatch: Bool = false,
+                      change: (inout ModelTransferRecord) -> Void) {
     synchronized {
       guard var record = records[id] else { return }
+      if requireGenerationMatch && record.generation != generation { return }
       change(&record)
       records[id] = record
       persist()
