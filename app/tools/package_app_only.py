@@ -13,7 +13,7 @@ def main() -> None:
     parser.add_argument("--release", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ffmpeg", type=Path, required=True)
-    parser.add_argument("--version", default="0.3.7")
+    parser.add_argument("--version", default="0.3.8")
     args = parser.parse_args()
 
     release = args.release.resolve()

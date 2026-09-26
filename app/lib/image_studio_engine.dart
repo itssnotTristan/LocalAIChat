@@ -2,8 +2,10 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+import 'image_edit_request.dart';
+
 /// A photo edit keeps its input and writes a separate output file. No image is
-/// sent to a server: Windows runs sd-cli, and iOS uses the Core ML bridge.
+/// sent to a server: Windows runs sd-cli, and iOS uses Core ML and Vision.
 class ImageStudioEngine {
   ImageStudioEngine({required this.root});
 
@@ -21,6 +23,15 @@ class ImageStudioEngine {
     void Function(String)? onStatus,
   }) async {
     if (prompt.trim().isEmpty) throw ArgumentError('Describe the edit first.');
+    final unsupported = unsupportedImageEdit(prompt);
+    if (unsupported != null) throw UnsupportedError(unsupported);
+    final backgroundOnly = isBackgroundReplacement(prompt);
+    if (backgroundOnly && Platform.isWindows) {
+      throw UnsupportedError(
+        'Background replacement that keeps the same person is available on iPhone. '
+        'The Windows image model redraws the whole photo, so it cannot preserve the subject.',
+      );
+    }
     if (!await File(inputPath).exists()) {
       throw StateError('The selected photo is missing.');
     }
@@ -33,13 +44,20 @@ class ImageStudioEngine {
       if (modelDirectory == null) {
         throw StateError('Install the local iPhone image model first.');
       }
-      onStatus?.call('Editing on this iPhone…');
+      onStatus?.call(
+        backgroundOnly
+            ? 'Keeping the original person and creating new scenery…'
+            : 'Editing on this iPhone…',
+      );
       final result = await const MethodChannel('local_ai_chat/image_studio')
           .invokeMethod<String>('editImage', {
             'input': inputPath,
             'output': outputPath,
             'modelDirectory': modelDirectory,
-            'prompt': prompt.trim(),
+            'prompt': backgroundOnly
+                ? backgroundScenePrompt(prompt)
+                : prompt.trim(),
+            'backgroundOnly': backgroundOnly,
             'strength': strength,
             'steps': steps,
             'seed': seed,

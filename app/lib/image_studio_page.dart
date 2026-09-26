@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 
 import 'glass_design.dart';
 import 'image_studio_engine.dart';
+import 'image_edit_request.dart';
 import 'image_studio_install.dart';
 
 class ImageStudioPage extends StatefulWidget {
@@ -29,7 +30,7 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
   String status = 'Choose a photo and describe your edit.';
   bool installing = false;
   bool editing = false;
-  double strength = 0.45;
+  double strength = 0.30;
   int steps = 20;
   int seed = -1;
 
@@ -104,6 +105,24 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       setState(() => status = 'Describe the edit you want first.');
       return;
     }
+    final unsupported = unsupportedImageEdit(prompt.text);
+    if (unsupported != null) {
+      setState(() => status = unsupported);
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('This edit is not supported'),
+          content: Text(unsupported),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
     setState(() {
       editing = true;
       output = null;
@@ -149,6 +168,26 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
     if (destination == null) return;
     if (Platform.isWindows) await File(result).copy(destination);
     if (mounted) setState(() => status = 'Saved edited photo.');
+  }
+
+  Future<void> discardOutput() async {
+    final result = output;
+    if (result == null) return;
+    final file = File(result);
+    if (await file.exists()) {
+      final root = await Directory('${widget.root}/outputs').absolute
+          .resolveSymbolicLinks();
+      final resolved = await file.absolute.resolveSymbolicLinks();
+      if (resolved.startsWith('$root${Platform.pathSeparator}')) {
+        await file.delete();
+      }
+    }
+    if (mounted) {
+      setState(() {
+        output = null;
+        status = 'Discarded the edit. Your original photo is unchanged.';
+      });
+    }
   }
 
   @override
@@ -244,22 +283,31 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
                         TextField(
                           controller: prompt,
                           maxLines: 3,
+                          onChanged: (_) => setState(() {}),
                           decoration: const InputDecoration(
                             labelText: 'Describe the edit',
                             hintText: 'Make the lighting warmer and change the background to a garden',
                             border: OutlineInputBorder(),
                           ),
                         ),
-                        const SizedBox(height: 12),
-                        Text('Change strength · ${(strength * 100).round()}%'),
-                        Slider(
-                          value: strength,
-                          min: 0.20,
-                          max: 0.85,
-                          onChanged: editing
-                              ? null
-                              : (value) => setState(() => strength = value),
+                        const SizedBox(height: 8),
+                        Text(
+                          isBackgroundReplacement(prompt.text)
+                              ? 'Background mode keeps the original person and generates only the scenery. Fine edges may need another try.'
+                              : 'This model redraws the whole photo. Higher strength can change faces, clothing, and pose.',
                         ),
+                        if (!isBackgroundReplacement(prompt.text)) ...[
+                          const SizedBox(height: 12),
+                          Text('Redraw amount · ${(strength * 100).round()}%'),
+                          Slider(
+                            value: strength,
+                            min: 0.20,
+                            max: 0.85,
+                            onChanged: editing
+                                ? null
+                                : (value) => setState(() => strength = value),
+                          ),
+                        ],
                         Text('Quality steps · $steps'),
                         Slider(
                           value: steps.toDouble(),
@@ -330,6 +378,11 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
                                 onPressed: () => Navigator.pop(context, output),
                                 icon: const Icon(Icons.chat_bubble_outline),
                                 label: const Text('Use in chat'),
+                              ),
+                              TextButton.icon(
+                                onPressed: discardOutput,
+                                icon: const Icon(Icons.delete_outline),
+                                label: const Text('Discard edit'),
                               ),
                             ],
                           ),

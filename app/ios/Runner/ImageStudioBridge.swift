@@ -1,10 +1,13 @@
 import CoreGraphics
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreML
 import Flutter
 import StableDiffusion
 import UIKit
+import Vision
 
-/// Runs image-to-image entirely on the phone. A new PNG is written for each edit.
+/// Runs local image generation and person-preserving compositing on the phone.
 final class ImageStudioBridge {
   private let lock = NSLock()
   private var busy = false
@@ -31,6 +34,7 @@ final class ImageStudioBridge {
           let output = args["output"] as? String,
           let resources = args["modelDirectory"] as? String,
           let prompt = args["prompt"] as? String,
+          let backgroundOnly = args["backgroundOnly"] as? Bool,
           let strength = args["strength"] as? Double,
           let steps = args["steps"] as? Int,
           let seed = args["seed"] as? Int,
@@ -52,6 +56,8 @@ final class ImageStudioBridge {
     DispatchQueue.global(qos: .userInitiated).async { [self] in
       do {
         let photo = try loadSquareImage(at: input)
+        let personMask = backgroundOnly ? try makePersonMask(for: photo) : nil
+        guard !isCancelled() else { throw ImageStudioError.cancelledOrEmpty }
         let mlConfig = MLModelConfiguration()
         mlConfig.computeUnits = .cpuAndNeuralEngine
         let pipeline = try StableDiffusionPipeline(
@@ -64,8 +70,12 @@ final class ImageStudioBridge {
         defer { pipeline.unloadResources() }
         try pipeline.loadResources()
         var options = StableDiffusionPipeline.Configuration(prompt: prompt)
-        options.startingImage = photo
-        options.strength = Float(min(max(strength, 0.05), 0.95))
+        if backgroundOnly {
+          options.negativePrompt = "person, people, human, portrait, face, body"
+        } else {
+          options.startingImage = photo
+          options.strength = Float(min(max(strength, 0.05), 0.95))
+        }
         options.stepCount = min(max(steps, 8), 40)
         options.seed = UInt32(clamping: seed)
         options.guidanceScale = 7.0
@@ -78,7 +88,18 @@ final class ImageStudioBridge {
           throw ImageStudioError.cancelledOrEmpty
         }
         guard !isCancelled() else { throw ImageStudioError.cancelledOrEmpty }
-        guard let png = UIImage(cgImage: image).pngData() else {
+        let edited: CGImage
+        if let personMask {
+          edited = try composite(
+            original: photo,
+            background: image,
+            personMask: personMask
+          )
+        } else {
+          edited = image
+        }
+        guard !isCancelled() else { throw ImageStudioError.cancelledOrEmpty }
+        guard let png = UIImage(cgImage: edited).pngData() else {
           throw ImageStudioError.cannotEncode
         }
         try png.write(to: URL(fileURLWithPath: output), options: .atomic)
@@ -126,18 +147,76 @@ final class ImageStudioBridge {
     guard let image = rendered.cgImage else { throw ImageStudioError.cannotDecode }
     return image
   }
+
+  /// Vision supplies a matte of the original person. A missing or nearly
+  /// full-frame matte is rejected so a generated stranger is never shown.
+  private func makePersonMask(for photo: CGImage) throws -> CIImage {
+    let request = VNGeneratePersonSegmentationRequest()
+    request.qualityLevel = .accurate
+    request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+    try VNImageRequestHandler(cgImage: photo, options: [:]).perform([request])
+    guard let buffer = request.results?.first?.pixelBuffer else {
+      throw ImageStudioError.personNotFound
+    }
+    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+      throw ImageStudioError.personNotFound
+    }
+    let width = CVPixelBufferGetWidth(buffer)
+    let height = CVPixelBufferGetHeight(buffer)
+    let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
+    let pixels = base.assumingMemoryBound(to: UInt8.self)
+    let stepX = max(1, width / 64)
+    let stepY = max(1, height / 64)
+    var sampled = 0
+    var covered = 0
+    for y in stride(from: 0, to: height, by: stepY) {
+      for x in stride(from: 0, to: width, by: stepX) {
+        sampled += 1
+        if pixels[y * rowBytes + x] > 128 { covered += 1 }
+      }
+    }
+    let coverage = Double(covered) / Double(max(1, sampled))
+    guard coverage > 0.005 && coverage < 0.95 else {
+      throw ImageStudioError.personNotFound
+    }
+    return CIImage(cvPixelBuffer: buffer).transformed(by: CGAffineTransform(
+      scaleX: CGFloat(photo.width) / CGFloat(width),
+      y: CGFloat(photo.height) / CGFloat(height)
+    ))
+  }
+
+  private func composite(original: CGImage, background: CGImage,
+                         personMask: CIImage) throws -> CGImage {
+    let filter = CIFilter.blendWithMask()
+    filter.inputImage = CIImage(cgImage: original)
+    filter.backgroundImage = CIImage(cgImage: background)
+    filter.maskImage = personMask
+    guard let result = filter.outputImage,
+          let rendered = CIContext().createCGImage(
+            result, from: CGRect(x: 0, y: 0,
+                                 width: CGFloat(original.width),
+                                 height: CGFloat(original.height))
+          ) else {
+      throw ImageStudioError.cannotEncode
+    }
+    return rendered
+  }
 }
 
 private enum ImageStudioError: LocalizedError {
   case cannotDecode
   case cannotEncode
   case cancelledOrEmpty
+  case personNotFound
 
   var errorDescription: String? {
     switch self {
     case .cannotDecode: return "Could not open the chosen photo."
     case .cannotEncode: return "Could not save the edited photo."
     case .cancelledOrEmpty: return "Image edit stopped before a result was ready."
+    case .personNotFound: return "Could not separate a person from this photo. Try a clearer photo with the person in view. Your original is unchanged."
     }
   }
 }
