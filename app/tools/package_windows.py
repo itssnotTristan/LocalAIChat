@@ -34,7 +34,7 @@ def main() -> int:
     parser.add_argument("--speech", type=Path, required=True)
     parser.add_argument("--ffmpeg", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--version", default="0.3.4")
+    parser.add_argument("--version", default="0.3.5")
     args = parser.parse_args()
 
     release = args.release.resolve()
@@ -93,8 +93,11 @@ Extract this ZIP, then run local_ai_chat.exe. Keep the extracted data, models, s
 
 The app includes local vision, text, adult roleplay, transcription, and five offline voices. Use Models to pick a model. In the conversation menu, choose a personality and edit saved memory. The phone icon starts a voice call. Fish Audio is optional and online: configure it in Settings > Voice only if you want it. The bundled FFmpeg executable decodes iPhone HEVC videos locally on Windows.
 
+Open Image Studio from the chat menu to edit your own photos locally. Tap Install image model once to download its separate image model to D: if that drive exists. It is roughly 4 GiB. Photos and edits stay on your PC, and edits save as new PNG files. Image Studio has no clothing-removal tool.
+
 If you used an older portable ZIP, installing this new folder will retain the chats in your Windows user profile. The app remaps bundled model and speech paths when the old folder is gone.
 """)
+        add(Path(__file__).resolve().parent.parent / "IMAGE_STUDIO.md", "IMAGE_STUDIO.md")
         archive.writestr(f"{root}/MODEL_SOURCES.txt", """Model sources:
 https://huggingface.co/ggml-org/SmolVLM2-500M-Video-Instruct-GGUF
 https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-abliterated-GGUF

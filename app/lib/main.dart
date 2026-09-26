@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'glass_design.dart';
 import 'inference_profile.dart';
 import 'inference_attempt.dart';
+import 'image_studio_page.dart';
 import 'color_picker.dart';
 import 'chat_context.dart';
 import 'fish_voice.dart';
@@ -2219,6 +2220,41 @@ class _ChatScreenState extends State<ChatScreen> {
     await endVoiceCall();
   }
 
+  Future<void> openImageStudio() async {
+    if (dataDir == null) {
+      showProblem('Local data is still loading.');
+      return;
+    }
+    final root = Platform.isWindows && await Directory('D:/').exists()
+        ? 'D:/LocalAIChat/image-studio'
+        : '${dataDir!.path}/image-studio';
+    if (!mounted) return;
+    final design = GlassDesign(
+      themeName: themeName,
+      customColor: customColor,
+      starColor: starColor,
+      starBackgroundColor: starBackgroundColor,
+      auroraColor: auroraColor,
+      motion: motion,
+      speed: motionSpeed,
+      backgroundStyle: backgroundStyle,
+      child: const SizedBox.shrink(),
+    );
+    final result = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => ImageStudioPage(root: root, design: design),
+      ),
+    );
+    if (result == null || !mounted) return;
+    try {
+      final owned = await copyIntoApp(result, 'media');
+      if (mounted) setState(() => attachments.add(MediaFrame(owned)));
+      await save();
+    } catch (error) {
+      showProblem('Could not attach edited photo: $error');
+    }
+  }
+
   Future<void> showModels() async {
     await showModalBottomSheet<void>(
       context: context,
@@ -3320,6 +3356,17 @@ class _ChatScreenState extends State<ChatScreen> {
                             Navigator.pop(context);
                           },
                         ),
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.auto_fix_high),
+                        title: const Text('Image Studio'),
+                        subtitle: const Text('Edit photos locally'),
+                        onTap: busy || callActive
+                            ? null
+                            : () {
+                                Navigator.pop(context);
+                                unawaited(openImageStudio());
+                              },
                       ),
                       Expanded(
                         child: ListView(

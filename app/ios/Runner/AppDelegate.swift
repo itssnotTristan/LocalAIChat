@@ -12,6 +12,14 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    let imageStudioBridge = ImageStudioBridge()
+    let imageStudioChannel = FlutterMethodChannel(
+      name: "local_ai_chat/image_studio",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    imageStudioChannel.setMethodCallHandler { call, result in
+      imageStudioBridge.handle(call, result: result)
+    }
     let mediaChannel = FlutterMethodChannel(
       name: "local_ai_chat/media",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
