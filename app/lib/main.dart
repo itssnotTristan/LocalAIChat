@@ -1687,6 +1687,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 item.text != '[Generation failed]',
           )
           .toList();
+      final previousAssistant = history
+          .where((item) => item.role == 'assistant')
+          .lastOrNull;
+      final previousUser = history
+          .where((item) => item.role == 'user')
+          .lastOrNull;
       // A text-only model cannot inspect previous media. Do not feed it an
       // earlier vision answer as if it were fresh visual evidence.
       final recent = textHistorySinceMedia(history);
@@ -1804,6 +1810,12 @@ class _ChatScreenState extends State<ChatScreen> {
                   customPersonality: chat.customPersonality,
                   memory: chat.memory,
                 ) +
+                (previousAssistant != null &&
+                        inferenceFrames.isEmpty &&
+                        question.text.split(RegExp(r'\s+')).length <= 10 &&
+                        !question.text.contains('?')
+                    ? '\nThe latest user message adds a new observation. Respond to that observation specifically. Do not reuse the previous assistant answer or guess why someone acted.'
+                    : '') +
                 (model.name.toLowerCase().contains('qwen3')
                     ? '\n/no_think'
                     : ''),
@@ -1828,12 +1840,16 @@ class _ChatScreenState extends State<ChatScreen> {
                 (null, final int start) => start,
                 (final int a, final int b) => a < b ? a : b,
               };
+              final candidate = repeatedFrom == null
+                  ? visible
+                  : visible.substring(0, repeatedFrom).trimRight();
+              final suppressReplay =
+                  previousAssistant != null &&
+                  (previousUser == null ||
+                      !isEchoedReply(question.text, previousUser.text)) &&
+                  isLikelyReplayPrefix(candidate, previousAssistant.text);
               if (mounted) {
-                setState(
-                  () => reply.text = repeatedFrom == null
-                      ? visible
-                      : visible.substring(0, repeatedFrom).trimRight(),
-                );
+                setState(() => reply.text = suppressReplay ? '…' : candidate);
               }
               if (repeatedFrom != null) {
                 stoppedForLoop = true;
@@ -1857,18 +1873,44 @@ class _ChatScreenState extends State<ChatScreen> {
           await Future<void>.delayed(const Duration(milliseconds: 350));
         }
       }
-      if (!cancelled &&
+      if (!stoppedForLoop) reply.text = visibleReply(rawReply);
+      final repeatedEarlier =
+          !cancelled &&
+          previousAssistant != null &&
+          (previousUser == null ||
+              !isEchoedReply(question.text, previousUser.text)) &&
+          isRepeatedAcrossTurns(reply.text, previousAssistant.text);
+      if (!cancelled && repeatedEarlier && inferenceFrames.isNotEmpty) {
+        reply.text = 'I repeated my previous reply. I cannot reliably tell what changed from these frames.';
+      } else if (!cancelled &&
           !stoppedForLoop &&
           inferenceFrames.isEmpty &&
-          (isEchoedReply(reply.text, question.text) ||
+          (repeatedEarlier ||
+              isEchoedReply(reply.text, question.text) ||
               isDetachedMediaReply(reply.text, question.text))) {
-        final better = models
+        final general = models
             .where(
               (candidate) =>
-                  !candidate.vision && candidate.name.contains('Nymphaea'),
+                  candidate.vision && candidate.name.contains('Qwen3 VL'),
             )
             .firstOrNull;
-        final retryModel = better ?? model;
+        final detailed = models
+            .where(
+              (candidate) =>
+                  candidate.vision && candidate.name.contains('Qwen3.5'),
+            )
+            .firstOrNull;
+        final retryModel = general ?? detailed ?? model;
+        final retryInput = List<LlamaResponseInputItem>.of(input);
+        if (repeatedEarlier && recent.contains(previousAssistant)) {
+          final lastAssistantIndex = retryInput.lastIndexWhere(
+            (item) => item.role == 'assistant',
+          );
+          if (lastAssistantIndex >= 0) retryInput.removeAt(lastAssistantIndex);
+        }
+        if (retryInput.length > 5) {
+          retryInput.removeRange(0, retryInput.length - 5);
+        }
         if (mounted) {
           setState(() {
             reply.text = '';
@@ -1888,32 +1930,39 @@ class _ChatScreenState extends State<ChatScreen> {
         var retryRaw = '';
         await for (final event in retryClient.responses.stream(
           model: 'retry',
-          input: input,
+          input: retryInput,
           instructions:
-              '${ChatContext.instructions(global: instructions, personality: chat.personality, customPersonality: chat.customPersonality, memory: chat.memory)}\nThis turn has no attached media. Answer the user’s question conversationally and directly. Do not echo the question or describe an image or frame.\n/no_think',
-          maxOutputTokens: inferenceProfile.outputTokens(
-            maxTokens,
-            hasMedia: false,
-            video: false,
-          ),
-          temperature: 0.7,
-          topP: 0.9,
+              '${ChatContext.instructions(global: instructions, personality: chat.personality, customPersonality: chat.customPersonality, memory: chat.memory)}\nThe previous answer failed to address the latest message. Start fresh from the user’s latest words. Do not reuse earlier assistant wording, guess motives, echo the user, or describe old media as if you can see it now. If the user only states a new observation, acknowledge it briefly without inventing an explanation.\n/no_think',
+          maxOutputTokens: inferenceProfile
+              .outputTokens(maxTokens, hasMedia: false, video: false)
+              .clamp(60, 180),
+          temperature: 0.4,
+          topP: 0.85,
         )) {
           if (cancelled) break;
           if (event is LlamaResponseOutputTextDelta) {
             retryRaw += event.delta;
-            if (mounted) setState(() => reply.text = visibleReply(retryRaw));
+            final visible = visibleReply(retryRaw);
+            final suppressReplay =
+                previousAssistant != null &&
+                isLikelyReplayPrefix(visible, previousAssistant.text);
+            if (mounted) {
+              setState(() => reply.text = suppressReplay ? '…' : visible);
+            }
           } else if (event is LlamaResponseFailed) {
             throw StateError(event.error.message);
           }
         }
+        if (!cancelled) reply.text = visibleReply(retryRaw);
         if (!cancelled &&
             (isEchoedReply(reply.text, question.text) ||
-                isDetachedMediaReply(reply.text, question.text))) {
-          reply.text =
-              'I could not answer that clearly. Please try another model.';
-        } else if (!cancelled && retryModel.path != model.path) {
-          modelPath = retryModel.path;
+                isDetachedMediaReply(reply.text, question.text) ||
+                (previousAssistant != null &&
+                    isRepeatedAcrossTurns(
+                      reply.text,
+                      previousAssistant.text,
+                    )))) {
+          reply.text = 'I repeated myself and lost the thread. I cannot tell more from what you have said so far.';
         }
       }
       if (reply.text.isEmpty)

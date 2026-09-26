@@ -37,6 +37,50 @@ bool isRepeatingReply(String text) {
   return repetitivePhraseStart(text) != null;
 }
 
+/// Detects a model reusing its previous answer after the user supplied a new
+/// message. Short acknowledgements are allowed; a long shared opening or a
+/// near-identical full answer is not.
+bool isRepeatedAcrossTurns(String current, String previous) {
+  List<String> words(String value) => RegExp(
+    r"[\p{L}\p{N}']+",
+    unicode: true,
+  ).allMatches(value.toLowerCase()).map((match) => match.group(0)!).toList();
+  final now = words(current);
+  final before = words(previous);
+  if (now.length < 8 || before.length < 8) return false;
+  if (now.join(' ') == before.join(' ')) return true;
+  var sharedStart = 0;
+  while (sharedStart < now.length &&
+      sharedStart < before.length &&
+      now[sharedStart] == before[sharedStart]) {
+    sharedStart++;
+  }
+  final shorter = now.length < before.length ? now.length : before.length;
+  if (sharedStart >= 10 && sharedStart * 2 >= shorter) return true;
+  final nowSet = now.toSet();
+  final beforeSet = before.toSet();
+  final shared = nowSet.intersection(beforeSet).length;
+  final union = nowSet.union(beforeSet).length;
+  return union >= 10 && shared / union >= 0.82;
+}
+
+/// While streaming, avoid showing a reply that is currently tracing the
+/// previous answer word for word. Reveal it once the wording diverges.
+bool isLikelyReplayPrefix(String current, String previous) {
+  List<String> words(String value) => RegExp(
+    r"[\p{L}\p{N}']+",
+    unicode: true,
+  ).allMatches(value.toLowerCase()).map((match) => match.group(0)!).toList();
+  final now = words(current);
+  final before = words(previous);
+  if (now.length < 3 || before.length < 8) return false;
+  final comparable = now.length < before.length ? now.length : before.length;
+  for (var i = 0; i < comparable; i++) {
+    if (now[i] != before[i]) return false;
+  }
+  return now.length <= before.length || before.length >= 10;
+}
+
 /// Returns the start of the redundant wording so the UI can keep the useful
 /// part of a reply. An exact eight-word repeat is enough on its own. Shorter
 /// phrases require three separated uses and a distinctive word; this catches

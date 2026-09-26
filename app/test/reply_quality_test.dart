@@ -26,6 +26,34 @@ void main() {
       isFalse,
     );
   });
+  test('catches a repeated answer across two different turns', () {
+    const previous =
+        'She may be joking with you. Ask her directly what she wants instead of guessing from the situation.';
+    expect(isRepeatedAcrossTurns(previous, previous), isTrue);
+    expect(
+      isRepeatedAcrossTurns(
+        'She may be joking with you. Ask her directly what she wants.',
+        previous,
+      ),
+      isTrue,
+    );
+    expect(
+      isRepeatedAcrossTurns(
+        'I cannot tell what she intends. You could ask her calmly.',
+        previous,
+      ),
+      isFalse,
+    );
+    expect(isRepeatedAcrossTurns('Okay.', 'Okay.'), isFalse);
+    expect(
+      isLikelyReplayPrefix('She may be joking with you.', previous),
+      isTrue,
+    );
+    expect(
+      isLikelyReplayPrefix('She is getting ready to leave.', previous),
+      isFalse,
+    );
+  });
   test('hides complete and streaming thinking blocks', () {
     expect(
       visibleReply('<think>private notes</think>Hello there.'),

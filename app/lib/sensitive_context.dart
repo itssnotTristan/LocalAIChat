@@ -8,7 +8,7 @@ String? sensitiveContextReply(
   final recent = priorUserMessages.toList().reversed.take(4).join(' ');
   final context = '$recent $latest';
   final family = RegExp(
-    r'\b(?:sister|brother|mother|father|mom|dad|daughter|son|aunt|uncle|cousin)\b',
+    r'\b(?:sis|sister|brother|mother|father|mom|dad|daughter|son|aunt|uncle|cousin)\b',
     caseSensitive: false,
   ).hasMatch(context);
   final asleep = RegExp(
