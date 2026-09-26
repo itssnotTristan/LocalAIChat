@@ -37,11 +37,16 @@ void main() {
     await File('${resources.path}/vocab.json').writeAsString('{}');
     await Directory('${resources.path}/VAEDecoder.mlmodelc').create();
     await Directory('${resources.path}/Unet.mlmodelc').create();
-    expect(await findCoreMLResources(root.path), isNull);
+    final requiredFiles = <String, int>{'vocab.json': 2};
+    expect(
+      await findCoreMLResources(root.path, requiredFiles: requiredFiles),
+      isNull,
+    );
     await Directory('${resources.path}/VAEEncoder.mlmodelc').create();
     expect(
-      await Directory((await findCoreMLResources(root.path))!)
-          .resolveSymbolicLinks(),
+      await Directory(
+        (await findCoreMLResources(root.path, requiredFiles: requiredFiles))!,
+      ).resolveSymbolicLinks(),
       await resources.resolveSymbolicLinks(),
     );
   });

@@ -157,16 +157,44 @@ Future<String?> findWindowsRuntime(String root) async {
   return null;
 }
 
-Future<String?> findCoreMLResources(String root) async {
+const coreMLResourceSizes = <String, int>{
+  'vocab.json': 862328,
+  'merges.txt': 524657,
+  'TextEncoder.mlmodelc/coremldata.bin': 825,
+  'TextEncoder.mlmodelc/model.mil': 208229,
+  'TextEncoder.mlmodelc/weights/weight.bin': 139866304,
+  'Unet.mlmodelc/coremldata.bin': 1207,
+  'Unet.mlmodelc/model.mil': 3040467,
+  'Unet.mlmodelc/weights/weight.bin': 645167616,
+  'VAEDecoder.mlmodelc/coremldata.bin': 755,
+  'VAEDecoder.mlmodelc/model.mil': 181386,
+  'VAEDecoder.mlmodelc/weights/weight.bin': 98993280,
+  'VAEEncoder.mlmodelc/coremldata.bin': 761,
+  'VAEEncoder.mlmodelc/model.mil': 139736,
+  'VAEEncoder.mlmodelc/weights/weight.bin': 68338112,
+};
+
+Future<String?> findCoreMLResources(
+  String root, {
+  Map<String, int> requiredFiles = coreMLResourceSizes,
+}) async {
   final folder = Directory('$root/coreml');
   if (!await folder.exists()) return null;
   await for (final entry in folder.list(recursive: true)) {
     if (entry is File && entry.path.endsWith('vocab.json')) {
       final candidate = entry.parent.path;
-      if (await Directory('$candidate/VAEEncoder.mlmodelc').exists() &&
+      var complete = true;
+      for (final item in requiredFiles.entries) {
+        final file = File('$candidate/${item.key}');
+        if (!await file.exists() || await file.length() != item.value) {
+          complete = false;
+          break;
+        }
+      }
+      if (complete &&
+          await Directory('$candidate/VAEEncoder.mlmodelc').exists() &&
           await Directory('$candidate/VAEDecoder.mlmodelc').exists() &&
-          (await Directory('$candidate/UnetChunk1.mlmodelc').exists() ||
-              await Directory('$candidate/Unet.mlmodelc').exists())) {
+          await Directory('$candidate/Unet.mlmodelc').exists()) {
         return candidate;
       }
     }
