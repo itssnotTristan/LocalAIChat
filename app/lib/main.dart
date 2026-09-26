@@ -15,6 +15,7 @@ import 'inference_attempt.dart';
 import 'image_studio_page.dart';
 import 'color_picker.dart';
 import 'chat_context.dart';
+import 'local_date.dart';
 import 'fish_voice.dart';
 import 'speech_service.dart';
 import 'self_test.dart';
@@ -332,6 +333,10 @@ class _ChatScreenState extends State<ChatScreen> {
         modelPath != autoModelPath) {
       final chosen = models.where((item) => item.path == modelPath).firstOrNull;
       if (chosen?.vision == true) {
+        final everyday = models.where(
+          (item) => !item.vision && item.name.contains('Ministral'),
+        );
+        if (everyday.isNotEmpty) return everyday.first;
         // A capable instruction-tuned vision model is also a better text chat
         // model than a creative roleplay fine-tune. Keep the chosen model.
         if (chosen!.name.contains('Qwen3 VL') ||
@@ -365,6 +370,9 @@ class _ChatScreenState extends State<ChatScreen> {
           if (model.vision) return model;
         }
       } else {
+        for (final model in models) {
+          if (!model.vision && model.name.contains('Ministral')) return model;
+        }
         for (final model in models) {
           if (model.vision && model.name.contains('Qwen3 VL')) return model;
         }
@@ -457,16 +465,16 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> downloadAdultTextModel() async {
+  Future<void> downloadEverydayModel() async {
     if (downloading || dataDir == null) return;
-    final directory = dataDir!.path + Platform.pathSeparator + 'models';
+    final directory = '${dataDir!.path}${Platform.pathSeparator}models';
     setState(() {
       downloading = true;
-      status = 'Downloading optional open-ended text model…';
+      status = 'Downloading Ministral 3B for everyday chat (about 2 GB)…';
     });
     var lastShownMiB = -1;
     try {
-      final path = await downloader.downloadAdultText(directory, (
+      final path = await downloader.downloadEveryday(directory, (
         name,
         received,
         total,
@@ -476,18 +484,35 @@ class _ChatScreenState extends State<ChatScreen> {
         lastShownMiB = currentMiB;
         setState(
           () => status =
-              'Downloading $name · $currentMiB MiB' +
-              (total == null ? '' : ' / ${total ~/ 1048576} MiB'),
+              '${name.startsWith('Verifying ') ? '' : 'Downloading '}$name · $currentMiB MiB'
+              '${total == null ? '' : ' / ${total ~/ 1048576} MiB'}',
         );
       });
       if (!models.any((item) => item.path == path)) {
-        models.add(LocalModel('Qwen2.5 1.5B · text', path));
+        models.add(LocalModel('Ministral 3B · everyday chat', path));
       }
-      modelPath = models.any((item) => item.vision) ? autoModelPath : path;
-      setState(() => status = 'Text model passed SHA-256 verification.');
+      // Retire only the old Qwen text file downloaded into this app's own
+      // model folder. Imported files elsewhere belong to their owner.
+      final oldText = File('$directory/${ModelDownloader.adultTextName}');
+      var oldModelRemoved = true;
+      if (await oldText.exists()) {
+        try {
+          await oldText.delete();
+          models.removeWhere((item) => item.path == oldText.path);
+        } on FileSystemException {
+          oldModelRemoved = false;
+        }
+      }
+      modelPath = autoModelPath;
+      if (mounted)
+        setState(
+          () => status = oldModelRemoved
+              ? 'Ministral is ready; the old Qwen text download was removed.'
+              : 'Ministral is ready; the old Qwen file could not be removed.',
+        );
       await save();
     } catch (error) {
-      if (mounted) setState(() => status = 'Model download: $error');
+      if (mounted) showProblem('Everyday model download failed: $error');
     } finally {
       if (mounted) setState(() => downloading = false);
     }
@@ -772,6 +797,17 @@ class _ChatScreenState extends State<ChatScreen> {
       if (Platform.isWindows) {
         final executableDir = File(Platform.resolvedExecutable).parent.path;
         for (final base in [
+          '$executableDir/models/ministral3-3b',
+          'D:/LocalAIChat/models/ministral3-3b',
+        ]) {
+          final path = '$base/${ModelDownloader.everydayName}';
+          if (await File(path).exists() &&
+              !models.any((item) => item.path == path)) {
+            models.add(LocalModel('Ministral 3B · everyday chat', path));
+            break;
+          }
+        }
+        for (final base in [
           '$executableDir/models/qwen25-1.5b-abliterated',
           'D:/LocalAIChat/models/qwen25-1.5b-abliterated',
         ]) {
@@ -830,6 +866,7 @@ class _ChatScreenState extends State<ChatScreen> {
           final oldPath = item.path;
           final filename = oldPath.split(RegExp(r'[/\\]')).last;
           for (final folder in [
+            'ministral3-3b',
             'smolvlm2-500m',
             'qwen25-1.5b-abliterated',
             'qwen35-4b-uncensored',
@@ -1588,13 +1625,19 @@ class _ChatScreenState extends State<ChatScreen> {
     if (inferenceFrames.isEmpty &&
         model.name.contains('Nymphaea') &&
         asksForGroundedAnswer(prompt)) {
+      final everyday = models.where(
+        (candidate) =>
+            !candidate.vision && candidate.name.contains('Ministral'),
+      );
       final general = models.where(
         (candidate) => candidate.vision && candidate.name.contains('Qwen3 VL'),
       );
       final detailed = models.where(
         (candidate) => candidate.vision && candidate.name.contains('Qwen3.5'),
       );
-      if (general.isNotEmpty) {
+      if (everyday.isNotEmpty) {
+        model = everyday.first;
+      } else if (general.isNotEmpty) {
         model = general.first;
       } else if (detailed.isNotEmpty) {
         model = detailed.first;
@@ -1682,6 +1725,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final preparedInferenceFiles = <String>[];
     try {
       await save();
+      final calendarAnswer = inferenceFrames.isEmpty
+          ? localDateAnswer(question.text, DateTime.now())
+          : null;
+      if (calendarAnswer != null) {
+        if (mounted)
+          setState(() {
+            reply.text = calendarAnswer;
+            status = 'Ready';
+          });
+        await speakReplyIfEnabled(reply.text, speakOnComplete: speakOnComplete);
+        return;
+      }
       final input = <LlamaResponseInputItem>[];
       final history = chat.entries
           .where(
@@ -1819,6 +1874,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   customPersonality: chat.customPersonality,
                   memory: chat.memory,
                 ) +
+                '\nThe current local date and time on this device are ${DateTime.now().toIso8601String()}. Use this for calendar questions.' +
                 libraryContext +
                 (previousAssistant != null &&
                         inferenceFrames.isEmpty &&
@@ -1898,6 +1954,12 @@ class _ChatScreenState extends State<ChatScreen> {
           (repeatedEarlier ||
               isEchoedReply(reply.text, question.text) ||
               isDetachedMediaReply(reply.text, question.text))) {
+        final everyday = models
+            .where(
+              (candidate) =>
+                  !candidate.vision && candidate.name.contains('Ministral'),
+            )
+            .firstOrNull;
         final general = models
             .where(
               (candidate) =>
@@ -1910,7 +1972,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   candidate.vision && candidate.name.contains('Qwen3.5'),
             )
             .firstOrNull;
-        final retryModel = general ?? detailed ?? model;
+        final retryModel = everyday ?? general ?? detailed ?? model;
         final retryInput = List<LlamaResponseInputItem>.of(input);
         if (repeatedEarlier && recent.contains(previousAssistant)) {
           final lastAssistantIndex = retryInput.lastIndexWhere(
@@ -1942,7 +2004,7 @@ class _ChatScreenState extends State<ChatScreen> {
           model: 'retry',
           input: retryInput,
           instructions:
-              '${ChatContext.instructions(global: instructions, personality: chat.personality, customPersonality: chat.customPersonality, memory: chat.memory)}$libraryContext\nThe previous answer failed to address the latest message. Start fresh from the user’s latest words. Do not reuse earlier assistant wording, guess motives, echo the user, or describe old media as if you can see it now. If the user only states a new observation, acknowledge it briefly without inventing an explanation.\n/no_think',
+              '${ChatContext.instructions(global: instructions, personality: chat.personality, customPersonality: chat.customPersonality, memory: chat.memory)}\nThe current local date and time on this device are ${DateTime.now().toIso8601String()}.$libraryContext\nThe previous answer failed to address the latest message. Start fresh from the user’s latest words. Do not reuse earlier assistant wording, guess motives, echo the user, or describe old media as if you can see it now. If the user only states a new observation, acknowledge it briefly without inventing an explanation.${retryModel.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''}',
           maxOutputTokens: inferenceProfile
               .outputTokens(maxTokens, hasMedia: false, video: false)
               .clamp(60, 180),
@@ -2480,21 +2542,21 @@ class _ChatScreenState extends State<ChatScreen> {
                         onPressed: downloading
                             ? null
                             : () async {
-                                await downloadStarterModel();
+                                await downloadEverydayModel();
                                 update(() {});
                               },
-                        icon: const Icon(Icons.download),
-                        label: const Text('Get starter vision model'),
+                        icon: const Icon(Icons.chat_bubble_outline),
+                        label: const Text('Get better everyday chat · 2 GB'),
                       ),
                       OutlinedButton.icon(
                         onPressed: downloading
                             ? null
                             : () async {
-                                await downloadAdultTextModel();
+                                await downloadStarterModel();
                                 update(() {});
                               },
                         icon: const Icon(Icons.download),
-                        label: const Text('Get open-ended text model'),
+                        label: const Text('Get starter vision model'),
                       ),
                       OutlinedButton.icon(
                         onPressed: downloading

@@ -21,11 +21,14 @@ class ModelDownloader {
       '6f67b8036b2469fcd71728702720c6b51aebd759b78137a8120733b4d66438bc';
   static const projectorSha256 =
       '921dc7e259f308e5b027111fa185efcbf33db13f6e35749ddf7f5cdb60ef520b';
-  static const adultTextUrl =
-      'https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-abliterated-GGUF/resolve/main/';
   static const adultTextName = 'Qwen2.5-1.5B-Instruct-abliterated.Q4_K_M.gguf';
-  static const adultTextSha256 =
-      '59aa9f44bde5349dbe292d7024d197db605f422b8baf65f3246a59abbde4e8e9';
+  static const everydayUrl =
+      'https://huggingface.co/bartowski/mistralai_Ministral-3-3B-Instruct-2512-GGUF/resolve/0a9035302dea19872c96076896304552890a73c2/';
+  static const everydayName =
+      'mistralai_Ministral-3-3B-Instruct-2512-Q4_K_M.gguf';
+  static const everydaySha256 =
+      'fec9d28c7f8dab7c6857d54b56c8264cce57d6f6d9003bd4110f6457f071c65a';
+  static const everydayBytes = 2146498528;
   static const detailedVisionUrl =
       'https://huggingface.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF/resolve/main/';
   static const detailedVisionName = 'Qwen3.5-4B-Uncensored.Q4_K_M.gguf';
@@ -86,7 +89,7 @@ class ModelDownloader {
     }
   }
 
-  Future<String> downloadAdultText(
+  Future<String> downloadEveryday(
     String directory,
     void Function(String name, int received, int? total) onProgress,
   ) async {
@@ -97,10 +100,11 @@ class ModelDownloader {
     try {
       return await _downloadOne(
         folder,
-        adultTextName,
-        adultTextSha256,
+        everydayName,
+        everydaySha256,
         onProgress,
-        baseUrl: adultTextUrl,
+        baseUrl: everydayUrl,
+        expectedBytes: everydayBytes,
       );
     } finally {
       _client?.close();

@@ -3,6 +3,7 @@ import 'dart:isolate';
 
 import 'package:archive/archive_io.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart';
 
 import 'image_studio_engine.dart';
 
@@ -13,26 +14,10 @@ class ImageStudioInstaller {
   HttpClient? _client;
   bool _cancelled = false;
 
-  static const windowsModelUrl =
-      'https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors';
-  static const windowsModelSha =
-      '6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa';
-  static const windowsRuntimeUrl =
-      'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-920-2f88688/sd-master-2f88688-bin-win-cuda12-x64.zip';
-  static const windowsRuntimeSha =
-      '479133a03d5c861ce77e70354dbbe75dd6e8d9955d1d1c7b6b1456b4571e3039';
-  static const cudaBlasUrl =
-      'https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.8.4.1-archive.zip';
-  static const cudaBlasSha =
-      '57a470112cec7e112c95253dde8b3c7184d795dbd92b0bde77a4cb7f8c94c8aa';
-  static const cudaRuntimeUrl =
-      'https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.8.90-archive.zip';
-  static const cudaRuntimeSha =
-      '4a39058fd8519444a81cfc7ae055d136f48d1a31ffa41ae255b35b2edd61e13b';
   static const iosModelUrl =
-      'https://huggingface.co/apple/coreml-stable-diffusion-v1-5-palettized/resolve/main/coreml-stable-diffusion-v1-5-palettized_split_einsum_v2_compiled.zip';
+      'https://huggingface.co/darkmaniac7/TokForge-RealisticVision-5.1-CoreML-6bit/resolve/c4c933a49ac1077166da765d14aae885e08317b3/RealisticVision-5.1_palettized_split_einsum_v2_compiled.zip';
   static const iosModelSha =
-      '49a6ac1f62e12a2b3e426730d686fa466e30cba11c03b85305775714fb9814ec';
+      'f39611acf39178af4f13e5c29205f80a48dc92d8a78c63fcbc0bad203d6fc87e';
 
   void cancel() {
     _cancelled = true;
@@ -43,53 +28,46 @@ class ImageStudioInstaller {
     _cancelled = false;
     _client = HttpClient();
     try {
-      if (Platform.isWindows) {
-        if (await findWindowsRuntime(root) == null) {
-          final zip = await _download(
-            windowsRuntimeUrl,
-            '$root/runtime/sd-cuda.zip',
-            expectedBytes: 333462536,
-            sha256Hex: windowsRuntimeSha,
-            status: status,
-          );
-          status('Installing the local image runtime…');
-          await Isolate.run(() => extractFileToDisk(zip, '$root/runtime'));
-          if (await findWindowsRuntime(root) == null) {
-            throw StateError(
-              'The image runtime archive did not contain sd-cli.exe.',
-            );
-          }
-        }
-        await _installCudaLibraries(status);
-        final model = File('$root/models/v1-5-pruned-emaonly.safetensors');
-        await _download(
-          windowsModelUrl,
-          model.path,
-          expectedBytes: 4265146304,
-          sha256Hex: windowsModelSha,
-          status: status,
-        );
-      } else if (Platform.isIOS) {
-        if (await findCoreMLResources(root) == null) {
+      if (Platform.isIOS) {
+        if (await findCoreMLResourcesAt('$root/coreml/realistic-vision-5.1') ==
+            null) {
           final zip = await _download(
             iosModelUrl,
-            '$root/coreml/coreml-sd15-split.zip',
-            expectedBytes: 1565721769,
+            '$root/coreml/realistic-vision-5.1.zip',
+            expectedBytes: 916522756,
             sha256Hex: iosModelSha,
             status: status,
           );
           status('Installing the local iPhone image model…');
-          await Isolate.run(() => extractFileToDisk(zip, '$root/coreml'));
-          if (await findCoreMLResources(root) == null) {
+          await Isolate.run(
+            () => extractFileToDisk(zip, '$root/coreml/realistic-vision-5.1'),
+          );
+          if (await findCoreMLResourcesAt(
+                '$root/coreml/realistic-vision-5.1',
+              ) ==
+              null) {
             throw StateError(
               'The image model is missing the files needed for photo editing.',
             );
           }
         }
-      } else {
-        throw UnsupportedError(
-          'Image Studio currently supports Windows and iOS.',
+        final resources = await findCoreMLResourcesAt(
+          '$root/coreml/realistic-vision-5.1',
         );
+        if (resources == null) {
+          throw StateError(
+            'The image model is incomplete. Tap Install to retry.',
+          );
+        }
+        status('Checking the image model on this iPhone…');
+        final verified = await const MethodChannel('local_ai_chat/image_studio')
+            .invokeMethod<bool>('verifyModel', {'modelDirectory': resources});
+        if (verified != true) {
+          throw StateError('The image model could not load on this iPhone.');
+        }
+        await _removeRetiredIphoneModel();
+      } else {
+        throw UnsupportedError('Image Studio is available on iPhone.');
       }
     } finally {
       _client?.close();
@@ -97,56 +75,23 @@ class ImageStudioInstaller {
     }
   }
 
-  Future<void> _installCudaLibraries(void Function(String) status) async {
-    // The CPU backend still works on PCs without an NVIDIA card.
-    try {
-      final gpu = await Process.run('nvidia-smi', ['-L']);
-      if (gpu.exitCode != 0) return;
-    } on ProcessException {
-      return;
-    }
-    final required = [
-      'cublas64_12.dll',
-      'cublasLt64_12.dll',
-      'cudart64_12.dll',
-    ];
-    final installed = await Future.wait(
-      required.map((name) => File('$root/runtime/$name').exists()),
-    );
-    if (installed.every((exists) => exists)) {
-      return;
-    }
-    for (final item in [
-      (url: cudaBlasUrl, file: 'cublas.zip', size: 563660944, sha: cudaBlasSha),
-      (
-        url: cudaRuntimeUrl,
-        file: 'cudart.zip',
-        size: 3037735,
-        sha: cudaRuntimeSha,
-      ),
+  /// Once the new model is complete, reclaim only the previous app-managed
+  /// SD 1.5 download and its top-level extracted resources.
+  Future<void> _removeRetiredIphoneModel() async {
+    for (final name in [
+      'coreml-sd15-split.zip',
+      'coreml-sd15-split.zip.part',
+      'realistic-vision-5.1.zip',
     ]) {
-      final zip = await _download(
-        item.url,
-        '$root/runtime/${item.file}',
-        expectedBytes: item.size,
-        sha256Hex: item.sha,
-        status: status,
-      );
-      status('Installing NVIDIA image acceleration…');
-      await Isolate.run(
-        () => extractFileToDisk(zip, '$root/runtime/cuda-deps'),
-      );
+      final file = File('$root/coreml/$name');
+      if (await file.exists()) await file.delete();
     }
-    final dependencies = Directory('$root/runtime/cuda-deps');
-    await for (final entry in dependencies.list(recursive: true)) {
-      if (entry is File && required.contains(entry.uri.pathSegments.last)) {
-        await entry.copy('$root/runtime/${entry.uri.pathSegments.last}');
-      }
-    }
-    if (!(await Future.wait(
-      required.map((name) => File('$root/runtime/$name').exists()),
-    )).every((exists) => exists)) {
-      throw StateError('NVIDIA runtime files were missing after extraction.');
+    for (final name in [
+      'Resources',
+      'coreml-stable-diffusion-v1-5-palettized_split_einsum_v2_compiled',
+    ]) {
+      final directory = Directory('$root/coreml/$name');
+      if (await directory.exists()) await directory.delete(recursive: true);
     }
   }
 

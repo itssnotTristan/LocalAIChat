@@ -5,33 +5,25 @@ import 'package:flutter/services.dart';
 import 'image_edit_request.dart';
 
 /// A photo edit keeps its input and writes a separate output file. No image is
-/// sent to a server: Windows runs sd-cli, and iOS uses Core ML and Vision.
+/// sent to a server: iOS uses Core ML and Vision.
 class ImageStudioEngine {
   ImageStudioEngine({required this.root});
 
   final String root;
-  Process? _running;
 
   Future<String> edit({
     required String inputPath,
+    required String modelDirectory,
     required String prompt,
     required double strength,
     required int steps,
     required int seed,
-    required int width,
-    required int height,
     void Function(String)? onStatus,
   }) async {
     if (prompt.trim().isEmpty) throw ArgumentError('Describe the edit first.');
     final unsupported = unsupportedImageEdit(prompt);
     if (unsupported != null) throw UnsupportedError(unsupported);
     final backgroundOnly = isBackgroundReplacement(prompt);
-    if (backgroundOnly && Platform.isWindows) {
-      throw UnsupportedError(
-        'Background replacement that keeps the same person is available on iPhone. '
-        'The Windows image model redraws the whole photo, so it cannot preserve the subject.',
-      );
-    }
     if (!await File(inputPath).exists()) {
       throw StateError('The selected photo is missing.');
     }
@@ -40,9 +32,8 @@ class ImageStudioEngine {
     final outputPath =
         '${outputDir.path}${Platform.pathSeparator}edit_${DateTime.now().microsecondsSinceEpoch}.png';
     if (Platform.isIOS) {
-      final modelDirectory = await findCoreMLResources(root);
-      if (modelDirectory == null) {
-        throw StateError('Install the local iPhone image model first.');
+      if (await findCompatibleCoreMLResources(modelDirectory) == null) {
+        throw StateError('Choose an installed iPhone image model first.');
       }
       onStatus?.call(
         backgroundOnly
@@ -67,60 +58,10 @@ class ImageStudioEngine {
       }
       return result;
     }
-    if (!Platform.isWindows) {
-      throw UnsupportedError(
-        'Image Studio currently supports Windows and iOS.',
-      );
-    }
-    final executable = await findWindowsRuntime(root);
-    if (executable == null) {
-      throw StateError('Install the local image editor runtime first.');
-    }
-    final model = File('$root/models/v1-5-pruned-emaonly.safetensors');
-    if (!await model.exists()) {
-      throw StateError('Install the local image editing model first.');
-    }
-    onStatus?.call('Editing on this PC…');
-    final process = await Process.start(
-      executable,
-      sdCliArguments(
-        model: model.path,
-        input: inputPath,
-        output: outputPath,
-        prompt: prompt.trim(),
-        strength: strength,
-        steps: steps,
-        seed: seed,
-        width: width,
-        height: height,
-      ),
-      workingDirectory: File(executable).parent.path,
-    );
-    _running = process;
-    final stderr = StringBuffer();
-    final output = process.stdout.drain<void>();
-    final errors = process.stderr
-        .transform(const SystemEncoding().decoder)
-        .listen((line) {
-          if (stderr.length < 4000) stderr.write(line);
-        });
-    try {
-      final code = await process.exitCode;
-      await output;
-      await errors.cancel();
-      if (code != 0 || !await File(outputPath).exists()) {
-        throw StateError(
-          'Local image edit failed (code $code). ${stderr.toString().trim()}',
-        );
-      }
-      return outputPath;
-    } finally {
-      _running = null;
-    }
+    throw UnsupportedError('Image Studio is available on iPhone.');
   }
 
   void cancel() {
-    _running?.kill();
     if (Platform.isIOS) {
       const MethodChannel('local_ai_chat/image_studio')
           .invokeMethod<void>('cancelEdit');
@@ -128,67 +69,20 @@ class ImageStudioEngine {
   }
 }
 
-List<String> sdCliArguments({
-  required String model,
-  required String input,
-  required String output,
-  required String prompt,
-  required double strength,
-  required int steps,
-  required int seed,
-  required int width,
-  required int height,
-}) => [
-  '-m',
-  model,
-  '-i',
-  input,
-  '-o',
-  output,
-  '-p',
-  prompt,
-  '--strength',
-  strength.toStringAsFixed(2),
-  '--steps',
-  '$steps',
-  '--cfg-scale',
-  '7',
-  '--seed',
-  '$seed',
-  '-W',
-  '$width',
-  '-H',
-  '$height',
-  '--vae-tiling',
-  '--image-preprocess',
-  'target=init,mode=fit-pad,pad_color=#202020',
-];
-
-Future<String?> findWindowsRuntime(String root) async {
-  final runtime = Directory('$root/runtime');
-  if (!await runtime.exists()) return null;
-  await for (final entry in runtime.list(recursive: true)) {
-    if (entry is File && entry.path.toLowerCase().endsWith('sd-cli.exe')) {
-      return entry.path;
-    }
-  }
-  return null;
-}
-
 const coreMLResourceSizes = <String, int>{
   'vocab.json': 862328,
   'merges.txt': 524657,
-  'TextEncoder.mlmodelc/coremldata.bin': 825,
-  'TextEncoder.mlmodelc/model.mil': 208229,
-  'TextEncoder.mlmodelc/weights/weight.bin': 139866304,
-  'Unet.mlmodelc/coremldata.bin': 1207,
-  'Unet.mlmodelc/model.mil': 3040467,
-  'Unet.mlmodelc/weights/weight.bin': 645167616,
-  'VAEDecoder.mlmodelc/coremldata.bin': 755,
-  'VAEDecoder.mlmodelc/model.mil': 181386,
+  'TextEncoder.mlmodelc/coremldata.bin': 968,
+  'TextEncoder.mlmodelc/model.mil': 185810,
+  'TextEncoder.mlmodelc/weights/weight.bin': 139910080,
+  'Unet.mlmodelc/coremldata.bin': 1401,
+  'Unet.mlmodelc/model.mil': 3136990,
+  'Unet.mlmodelc/weights/weight.bin': 645325440,
+  'VAEDecoder.mlmodelc/coremldata.bin': 895,
+  'VAEDecoder.mlmodelc/model.mil': 194901,
   'VAEDecoder.mlmodelc/weights/weight.bin': 98993280,
-  'VAEEncoder.mlmodelc/coremldata.bin': 761,
-  'VAEEncoder.mlmodelc/model.mil': 139736,
+  'VAEEncoder.mlmodelc/coremldata.bin': 899,
+  'VAEEncoder.mlmodelc/model.mil': 149284,
   'VAEEncoder.mlmodelc/weights/weight.bin': 68338112,
 };
 
@@ -201,21 +95,69 @@ Future<String?> findCoreMLResources(
   await for (final entry in folder.list(recursive: true)) {
     if (entry is File && entry.path.endsWith('vocab.json')) {
       final candidate = entry.parent.path;
+      if (await _hasCoreMLResources(candidate, requiredFiles)) return candidate;
+    }
+  }
+  return null;
+}
+
+Future<String?> findCoreMLResourcesAt(
+  String folder, {
+  Map<String, int> requiredFiles = coreMLResourceSizes,
+}) async {
+  final base = Directory(folder);
+  if (!await base.exists()) return null;
+  await for (final entry in base.list(recursive: true, followLinks: false)) {
+    if (entry is File && entry.path.endsWith('vocab.json')) {
+      final candidate = entry.parent.path;
+      if (await _hasCoreMLResources(candidate, requiredFiles)) return candidate;
+    }
+  }
+  return null;
+}
+
+Future<String?> findCompatibleCoreMLResources(String folder) async {
+  final base = Directory(folder);
+  if (!await base.exists()) return null;
+  await for (final entry in base.list(recursive: true, followLinks: false)) {
+    if (entry is File && entry.path.endsWith('vocab.json')) {
+      final candidate = entry.parent.path;
       var complete = true;
-      for (final item in requiredFiles.entries) {
-        final file = File('$candidate/${item.key}');
-        if (!await file.exists() || await file.length() != item.value) {
+      for (final name in [
+        'vocab.json',
+        'merges.txt',
+        'TextEncoder.mlmodelc/coremldata.bin',
+        'Unet.mlmodelc/coremldata.bin',
+        'VAEEncoder.mlmodelc/coremldata.bin',
+        'VAEDecoder.mlmodelc/coremldata.bin',
+      ]) {
+        final file = File('$candidate/$name');
+        if (!await file.exists() || await file.length() == 0) {
           complete = false;
           break;
         }
       }
-      if (complete &&
-          await Directory('$candidate/VAEEncoder.mlmodelc').exists() &&
-          await Directory('$candidate/VAEDecoder.mlmodelc').exists() &&
-          await Directory('$candidate/Unet.mlmodelc').exists()) {
-        return candidate;
-      }
+      if (complete) return candidate;
     }
   }
   return null;
+}
+
+Future<bool> _hasCoreMLResources(
+  String folder,
+  Map<String, int> requiredFiles,
+) async {
+  for (final name in [
+    'TextEncoder.mlmodelc',
+    'Unet.mlmodelc',
+    'VAEDecoder.mlmodelc',
+    'VAEEncoder.mlmodelc',
+  ]) {
+    if (!await Directory('$folder/$name').exists()) return false;
+  }
+  for (final item in requiredFiles.entries) {
+    final file = File('$folder/${item.key}');
+    if (!await file.exists() || await file.length() != item.value) return false;
+  }
+  return true;
 }

@@ -21,6 +21,39 @@ final class ImageStudioBridge {
       result(nil)
       return
     }
+    if call.method == "verifyModel" {
+      guard #available(iOS 17.0, *),
+            let args = call.arguments as? [String: Any],
+            let resources = args["modelDirectory"] as? String else {
+        result(FlutterError(code: "model_input", message: "Choose an iPhone Core ML image model.", details: nil))
+        return
+      }
+      lock.lock()
+      let alreadyBusy = busy
+      if !alreadyBusy { busy = true }
+      lock.unlock()
+      if alreadyBusy {
+        result(FlutterError(code: "edit_busy", message: "Wait for the current image operation to finish.", details: nil))
+        return
+      }
+      DispatchQueue.global(qos: .userInitiated).async { [self] in
+        do {
+          let config = MLModelConfiguration()
+          config.computeUnits = .cpuAndNeuralEngine
+          let pipeline = try StableDiffusionPipeline(
+            resourcesAt: URL(fileURLWithPath: resources, isDirectory: true),
+            controlNet: [], configuration: config,
+            disableSafety: true, reduceMemory: true
+          )
+          try pipeline.loadResources()
+          pipeline.unloadResources()
+          finish(result, value: true)
+        } catch {
+          finish(result, error: FlutterError(code: "model_invalid", message: "This model cannot load on this iPhone: \(error.localizedDescription)", details: nil))
+        }
+      }
+      return
+    }
     guard call.method == "editImage" else {
       result(FlutterMethodNotImplemented)
       return
@@ -56,7 +89,7 @@ final class ImageStudioBridge {
     DispatchQueue.global(qos: .userInitiated).async { [self] in
       do {
         let photo = try loadSquareImage(at: input)
-        let personMask = backgroundOnly ? try makePersonMask(for: photo) : nil
+        let subjectMask = backgroundOnly ? try makeSubjectMask(for: photo) : nil
         guard !isCancelled() else { throw ImageStudioError.cancelledOrEmpty }
         let mlConfig = MLModelConfiguration()
         mlConfig.computeUnits = .cpuAndNeuralEngine
@@ -71,7 +104,7 @@ final class ImageStudioBridge {
         try pipeline.loadResources()
         var options = StableDiffusionPipeline.Configuration(prompt: prompt)
         if backgroundOnly {
-          options.negativePrompt = "person, people, human, portrait, face, body"
+          options.negativePrompt = "person, people, human, portrait, face, body, table, furniture, indoor room, walls"
         } else {
           options.startingImage = photo
           options.strength = Float(min(max(strength, 0.05), 0.95))
@@ -89,11 +122,11 @@ final class ImageStudioBridge {
         }
         guard !isCancelled() else { throw ImageStudioError.cancelledOrEmpty }
         let edited: CGImage
-        if let personMask {
+        if let subjectMask {
           edited = try composite(
             original: photo,
             background: image,
-            personMask: personMask
+            subjectMask: subjectMask
           )
         } else {
           edited = image
@@ -120,7 +153,7 @@ final class ImageStudioBridge {
     return cancelled
   }
 
-  private func finish(_ result: @escaping FlutterResult, value: String? = nil, error: FlutterError? = nil) {
+  private func finish(_ result: @escaping FlutterResult, value: Any? = nil, error: FlutterError? = nil) {
     lock.lock()
     busy = false
     lock.unlock()
@@ -148,51 +181,130 @@ final class ImageStudioBridge {
     return image
   }
 
-  /// Vision supplies a matte of the original person. A missing or nearly
-  /// full-frame matte is rejected so a generated stranger is never shown.
-  private func makePersonMask(for photo: CGImage) throws -> CIImage {
-    let request = VNGeneratePersonSegmentationRequest()
-    request.qualityLevel = .accurate
-    request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-    try VNImageRequestHandler(cgImage: photo, options: [:]).perform([request])
-    guard let buffer = request.results?.first?.pixelBuffer else {
+  /// The foreground-instance model follows the complete visible subject.
+  /// The older person model is used only to identify which instance is human;
+  /// its truncated matte is never used for the final composite.
+  private func makeSubjectMask(for photo: CGImage) throws -> CIImage {
+    let handler = VNImageRequestHandler(cgImage: photo, options: [:])
+    let personRequest = VNGeneratePersonSegmentationRequest()
+    personRequest.qualityLevel = .accurate
+    personRequest.outputPixelFormat = kCVPixelFormatType_OneComponent8
+    let foregroundRequest = VNGenerateForegroundInstanceMaskRequest()
+    try handler.perform([personRequest, foregroundRequest])
+    guard let person = personRequest.results?.first?.pixelBuffer,
+          let observation = foregroundRequest.results?.first,
+          let selected = matchingForegroundInstance(
+            person: person, instances: observation.instanceMask
+          ), observation.allInstances.contains(selected) else {
       throw ImageStudioError.personNotFound
     }
-    CVPixelBufferLockBaseAddress(buffer, .readOnly)
-    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-    guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+    let instanceBuffer = observation.instanceMask
+    let coverage = instanceCoverage(instanceBuffer, label: selected)
+    guard coverage > 0.01, coverage < 0.75,
+          !hasAbruptSubjectCutoff(instanceBuffer, label: selected) else {
       throw ImageStudioError.personNotFound
     }
-    let width = CVPixelBufferGetWidth(buffer)
-    let height = CVPixelBufferGetHeight(buffer)
-    let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
-    let pixels = base.assumingMemoryBound(to: UInt8.self)
-    let stepX = max(1, width / 64)
-    let stepY = max(1, height / 64)
-    var sampled = 0
-    var covered = 0
-    for y in stride(from: 0, to: height, by: stepY) {
-      for x in stride(from: 0, to: width, by: stepX) {
-        sampled += 1
-        if pixels[y * rowBytes + x] > 128 { covered += 1 }
-      }
-    }
-    let coverage = Double(covered) / Double(max(1, sampled))
-    guard coverage > 0.005 && coverage < 0.95 else {
-      throw ImageStudioError.personNotFound
-    }
+    let buffer = try observation.generateScaledMaskForImage(
+      forInstances: IndexSet(integer: selected), from: handler
+    )
     return CIImage(cvPixelBuffer: buffer).transformed(by: CGAffineTransform(
-      scaleX: CGFloat(photo.width) / CGFloat(width),
-      y: CGFloat(photo.height) / CGFloat(height)
+      scaleX: CGFloat(photo.width) / CGFloat(CVPixelBufferGetWidth(buffer)),
+      y: CGFloat(photo.height) / CGFloat(CVPixelBufferGetHeight(buffer))
     ))
   }
 
+  private func matchingForegroundInstance(person: CVPixelBuffer,
+                                          instances: CVPixelBuffer) -> Int? {
+    guard CVPixelBufferGetPixelFormatType(person) == kCVPixelFormatType_OneComponent8,
+          CVPixelBufferGetPixelFormatType(instances) == kCVPixelFormatType_OneComponent8 else {
+      return nil
+    }
+    CVPixelBufferLockBaseAddress(person, .readOnly)
+    CVPixelBufferLockBaseAddress(instances, .readOnly)
+    defer {
+      CVPixelBufferUnlockBaseAddress(instances, .readOnly)
+      CVPixelBufferUnlockBaseAddress(person, .readOnly)
+    }
+    guard let personBase = CVPixelBufferGetBaseAddress(person),
+          let instanceBase = CVPixelBufferGetBaseAddress(instances) else { return nil }
+    let personPixels = personBase.assumingMemoryBound(to: UInt8.self)
+    let instancePixels = instanceBase.assumingMemoryBound(to: UInt8.self)
+    let pw = CVPixelBufferGetWidth(person)
+    let ph = CVPixelBufferGetHeight(person)
+    let iw = CVPixelBufferGetWidth(instances)
+    let ih = CVPixelBufferGetHeight(instances)
+    let personRow = CVPixelBufferGetBytesPerRow(person)
+    let instanceRow = CVPixelBufferGetBytesPerRow(instances)
+    var hits = [Int: Int]()
+    var personSamples = 0
+    for y in stride(from: 0, to: ph, by: max(1, ph / 128)) {
+      for x in stride(from: 0, to: pw, by: max(1, pw / 128)) {
+        guard personPixels[y * personRow + x] > 128 else { continue }
+        personSamples += 1
+        let label = Int(instancePixels[(y * ih / ph) * instanceRow + (x * iw / pw)])
+        if label != 0 { hits[label, default: 0] += 1 }
+      }
+    }
+    guard let winner = hits.max(by: { $0.value < $1.value }),
+          winner.value >= max(12, personSamples / 3) else { return nil }
+    return winner.key
+  }
+
+  private func instanceCoverage(_ buffer: CVPixelBuffer, label: Int) -> Double {
+    guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_OneComponent8 else {
+      return 0
+    }
+    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else { return 0 }
+    let pixels = base.assumingMemoryBound(to: UInt8.self)
+    let width = CVPixelBufferGetWidth(buffer)
+    let height = CVPixelBufferGetHeight(buffer)
+    let row = CVPixelBufferGetBytesPerRow(buffer)
+    var covered = 0
+    var sampled = 0
+    for y in stride(from: 0, to: height, by: max(1, height / 128)) {
+      for x in stride(from: 0, to: width, by: max(1, width / 128)) {
+        sampled += 1
+        if Int(pixels[y * row + x]) == label { covered += 1 }
+      }
+    }
+    return Double(covered) / Double(max(1, sampled))
+  }
+
+  /// A broad, flat end in the middle of a portrait usually means the matte
+  /// dropped the rest of the body. Stop before spending time generating scenery.
+  private func hasAbruptSubjectCutoff(_ buffer: CVPixelBuffer, label: Int) -> Bool {
+    guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_OneComponent8 else {
+      return true
+    }
+    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else { return true }
+    let pixels = base.assumingMemoryBound(to: UInt8.self)
+    let width = CVPixelBufferGetWidth(buffer)
+    let height = CVPixelBufferGetHeight(buffer)
+    let row = CVPixelBufferGetBytesPerRow(buffer)
+    var rowWidths = [Int](repeating: 0, count: height)
+    for y in 0..<height {
+      for x in 0..<width where Int(pixels[y * row + x]) == label {
+        rowWidths[y] += 1
+      }
+    }
+    guard let first = rowWidths.firstIndex(where: { $0 > 0 }),
+          let last = rowWidths.lastIndex(where: { $0 > 0 }) else { return true }
+    let end = Array(rowWidths[max(first, last - 3)...last])
+    let endWidth = Double(end.reduce(0, +)) / Double(max(1, end.count * width))
+    return last < Int(Double(height) * 0.80) &&
+      first < Int(Double(height) * 0.35) && endWidth > 0.20
+  }
+
   private func composite(original: CGImage, background: CGImage,
-                         personMask: CIImage) throws -> CGImage {
+                         subjectMask: CIImage) throws -> CGImage {
     let filter = CIFilter.blendWithMask()
     filter.inputImage = CIImage(cgImage: original)
     filter.backgroundImage = CIImage(cgImage: background)
-    filter.maskImage = personMask
+    filter.maskImage = subjectMask
     guard let result = filter.outputImage,
           let rendered = CIContext().createCGImage(
             result, from: CGRect(x: 0, y: 0,
@@ -216,7 +328,7 @@ private enum ImageStudioError: LocalizedError {
     case .cannotDecode: return "Could not open the chosen photo."
     case .cannotEncode: return "Could not save the edited photo."
     case .cancelledOrEmpty: return "Image edit stopped before a result was ready."
-    case .personNotFound: return "Could not separate a person from this photo. Try a clearer photo with the person in view. Your original is unchanged."
+    case .personNotFound: return "Could not keep the complete subject in this photo. Try a clearer photo with the whole subject in view. Your original is unchanged."
     }
   }
 }

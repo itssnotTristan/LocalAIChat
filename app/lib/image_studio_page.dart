@@ -10,6 +10,7 @@ import 'glass_design.dart';
 import 'image_studio_engine.dart';
 import 'image_edit_request.dart';
 import 'image_studio_install.dart';
+import 'image_studio_models.dart';
 
 class ImageStudioPage extends StatefulWidget {
   const ImageStudioPage({required this.root, required this.design, super.key});
@@ -25,6 +26,9 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
   final prompt = TextEditingController();
   late final ImageStudioEngine engine = ImageStudioEngine(root: widget.root);
   late final ImageStudioInstaller installer = ImageStudioInstaller(widget.root);
+  late final ImageStudioModels modelStore = ImageStudioModels(widget.root);
+  List<InstalledImageModel> models = [];
+  String? selectedModelId;
   String? source;
   String? output;
   String status = 'Choose a photo and describe your edit.';
@@ -33,6 +37,23 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
   double strength = 0.30;
   int steps = 20;
   int seed = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    refreshModels();
+  }
+
+  Future<void> refreshModels() async {
+    final available = await modelStore.installed();
+    final selected = await modelStore.selected();
+    if (mounted) {
+      setState(() {
+        models = available;
+        selectedModelId = selected?.id;
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -90,6 +111,8 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       await installer.install((message) {
         if (mounted) setState(() => status = message);
       });
+      await modelStore.select(ImageStudioModels.builtInId);
+      await refreshModels();
       if (mounted) setState(() => status = 'Image model ready on this device.');
     } catch (error) {
       if (mounted) setState(() => status = 'Install paused: $error');
@@ -98,9 +121,134 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
     }
   }
 
+  Future<void> importModel() async {
+    if (installing || editing) return;
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['zip'],
+      withData: false,
+    );
+    final item = picked?.files.single;
+    if (item?.path == null) return;
+    setState(() {
+      installing = true;
+      status = 'Checking the imported image model…';
+    });
+    try {
+      await modelStore.importZip(
+        item!.path!,
+        item.name.replaceFirst(RegExp(r'\.zip$', caseSensitive: false), ''),
+        (message) {
+          if (mounted) setState(() => status = message);
+        },
+      );
+      await refreshModels();
+      if (mounted)
+        setState(() => status = 'Imported model ready on this iPhone.');
+    } catch (error) {
+      if (mounted) setState(() => status = 'Model import failed: $error');
+    } finally {
+      if (mounted) setState(() => installing = false);
+    }
+  }
+
+  Future<void> chooseModel(String id) async {
+    if (installing || editing) return;
+    try {
+      await modelStore.select(id);
+      await refreshModels();
+      if (mounted) setState(() => status = 'Image model changed.');
+    } catch (error) {
+      if (mounted) setState(() => status = 'Could not change model: $error');
+    }
+  }
+
+  Future<void> renameModel() async {
+    final model = models
+        .where((item) => item.id == selectedModelId)
+        .firstOrNull;
+    if (model == null || installing || editing) return;
+    var editedName = model.name;
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Rename image model'),
+        content: TextFormField(
+          initialValue: model.name,
+          onChanged: (value) => editedName = value,
+          autofocus: true,
+          maxLength: 60,
+          decoration: const InputDecoration(labelText: 'Model name'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, editedName),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (name == null) return;
+    try {
+      await modelStore.rename(model.id, name);
+      await refreshModels();
+    } catch (error) {
+      if (mounted) setState(() => status = 'Could not rename model: $error');
+    }
+  }
+
+  Future<void> deleteModel() async {
+    final model = models
+        .where((item) => item.id == selectedModelId)
+        .firstOrNull;
+    if (model == null || installing || editing) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Delete ${model.name}?'),
+        content: const Text(
+          'This removes this model from the app. Your original photos and edited results stay saved.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete model'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() => installing = true);
+    try {
+      await modelStore.delete(model.id);
+      await refreshModels();
+      if (mounted) setState(() => status = 'Deleted ${model.name}.');
+    } catch (error) {
+      if (mounted) setState(() => status = 'Could not delete model: $error');
+    } finally {
+      if (mounted) setState(() => installing = false);
+    }
+  }
+
   Future<void> makeEdit() async {
     final input = source;
     if (input == null || editing || installing) return;
+    final model = await modelStore.selected();
+    if (model == null) {
+      if (mounted)
+        setState(
+          () => status = 'Install or import an iPhone image model first.',
+        );
+      return;
+    }
     if (prompt.text.trim().isEmpty) {
       setState(() => status = 'Describe the edit you want first.');
       return;
@@ -123,6 +271,7 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       );
       return;
     }
+    FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       editing = true;
       output = null;
@@ -131,12 +280,11 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
     try {
       final result = await engine.edit(
         inputPath: input,
+        modelDirectory: model.directory,
         prompt: prompt.text,
         strength: strength,
         steps: steps,
         seed: seed < 0 ? math.Random.secure().nextInt(0x7fffffff) : seed,
-        width: 512,
-        height: 512,
         onStatus: (message) {
           if (mounted) setState(() => status = message);
         },
@@ -239,8 +387,15 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
                               label: Text(
                                 installing
                                     ? 'Installing…'
-                                    : 'Install image model',
+                                    : 'Install Realistic Vision model',
                               ),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: installing || editing
+                                  ? null
+                                  : importModel,
+                              icon: const Icon(Icons.file_upload_outlined),
+                              label: const Text('Import Core ML ZIP'),
                             ),
                             OutlinedButton.icon(
                               onPressed: editing ? null : pickPhoto,
@@ -248,6 +403,58 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
                                 Icons.add_photo_alternate_outlined,
                               ),
                               label: const Text('Choose photo'),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<String>(
+                          key: ValueKey(selectedModelId),
+                          initialValue: selectedModelId,
+                          decoration: const InputDecoration(
+                            labelText: 'Image editing model',
+                            border: OutlineInputBorder(),
+                          ),
+                          hint: const Text('Install or import a model'),
+                          items: models
+                              .map(
+                                (model) => DropdownMenuItem(
+                                  value: model.id,
+                                  child: Text(
+                                    model.name,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: installing || editing
+                              ? null
+                              : (id) {
+                                  if (id != null) chooseModel(id);
+                                },
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          children: [
+                            TextButton.icon(
+                              onPressed:
+                                  selectedModelId == null ||
+                                      installing ||
+                                      editing
+                                  ? null
+                                  : renameModel,
+                              icon: const Icon(Icons.edit_outlined),
+                              label: const Text('Rename'),
+                            ),
+                            TextButton.icon(
+                              onPressed:
+                                  selectedModelId == null ||
+                                      installing ||
+                                      editing
+                                  ? null
+                                  : deleteModel,
+                              icon: const Icon(Icons.delete_outline),
+                              label: const Text('Delete model'),
                             ),
                           ],
                         ),
@@ -293,7 +500,7 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
                         const SizedBox(height: 8),
                         Text(
                           isBackgroundReplacement(prompt.text)
-                              ? 'Background mode keeps the original person and generates only the scenery. Fine edges may need another try.'
+                              ? 'Background mode selects the whole subject before generating scenery. Check the silhouette before saving.'
                               : 'This model redraws the whole photo. Higher strength can change faces, clothing, and pose.',
                         ),
                         if (!isBackgroundReplacement(prompt.text)) ...[

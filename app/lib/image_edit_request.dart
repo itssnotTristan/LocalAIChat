@@ -3,7 +3,9 @@
 String? unsupportedImageEdit(String prompt) {
   final request = prompt.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   final asksForNudity = RegExp(
-    r'\b(nudify|undress|unclothe|nude|naked|topless)\b',
+    r'\b(nudify|undress|unclothe)\b|'
+    r'\b(make|turn)\s+(me|her|him|them|the person|this person|the subject)\s+'
+    r'(look\s+)?(completely\s+)?(nude|naked|topless)\b',
   ).hasMatch(request);
   final asksToRemoveClothing = RegExp(
     r'\b(remove|erase|delete|take off|strip off|strip)\b.{0,40}'
@@ -59,6 +61,13 @@ String backgroundScenePrompt(String prompt) {
   );
   scene = scene.replaceFirst(RegExp(r'[.!?]+$'), '').trim();
   if (scene.isEmpty) scene = 'a natural outdoor setting';
+  if (RegExp(
+    r'\b(forest|woods|woodland)\b',
+    caseSensitive: false,
+  ).hasMatch(scene)) {
+    return 'Photorealistic outdoor woodland, $scene, trees and natural '
+        'forest floor filling the entire frame, daylight, eye-level photograph';
+  }
   return 'Photorealistic empty scenery, $scene, natural lighting, '
       'realistic environment';
 }
