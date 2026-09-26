@@ -23,6 +23,7 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
   static let sessionIdentifier = "com.localai.localAiChat.modelTransfers"
   private let storageKey = "modelTransferRecordsV1"
   private var records = [String: ModelTransferRecord]()
+  private var activeDescriptions = Set<String>()
   private var backgroundCompletion: (() -> Void)?
   private lazy var session: URLSession = {
     let configuration = URLSessionConfiguration.background(
@@ -75,6 +76,7 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
           destination: target, state: "downloading", received: 0,
           expected: (args["expected"] as? NSNumber)?.int64Value ?? 0,
           error: nil)
+        activeDescriptions.insert("\(id)|\(generation)")
         persist()
         return false
       }
@@ -88,7 +90,18 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
       session.getAllTasks { [weak self] tasks in
         guard let self else { return }
         let values = self.synchronized { () -> [[String: Any]] in
-          self.records.values.sorted { $0.id < $1.id }.map { record in
+          let interrupted = self.records.values.filter { record in
+            let description = self.description(for: record)
+            return record.state == "downloading" &&
+              !self.activeDescriptions.contains(description) &&
+              !tasks.contains(where: { $0.taskDescription == description })
+          }.map { $0.id }
+          for id in interrupted {
+            self.records[id]?.state = "failed"
+            self.records[id]?.error = "Download was interrupted. Tap download to retry."
+          }
+          if !interrupted.isEmpty { self.persist() }
+          return self.records.values.sorted { $0.id < $1.id }.map { record in
             var value = record.dictionary
             if let task = tasks.first(where: {
                  $0.taskDescription == self.description(for: record) }),
@@ -117,6 +130,9 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
           self.records[id].map { self.description(for: $0) }
         }
         tasks.filter { $0.taskDescription == description }.forEach { $0.cancel() }
+        if let description {
+          self.synchronized { self.activeDescriptions.remove(description) }
+        }
         self.update(id) { $0.state = "cancelled" }
         DispatchQueue.main.async { result(nil) }
       }
@@ -164,6 +180,9 @@ final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
 
   func urlSession(_ session: URLSession, task: URLSessionTask,
                   didCompleteWithError error: Error?) {
+    if let description = task.taskDescription {
+      synchronized { activeDescriptions.remove(description) }
+    }
     guard let (id, generation) = identity(of: task), let error else { return }
     update(id, generation: generation, requireGenerationMatch: true) {
       if $0.state != "downloaded" && $0.state != "cancelled" {
