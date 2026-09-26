@@ -46,6 +46,31 @@ void main() {
     );
   });
 
+  test('keeps the first thought when the model restarts it three times', () {
+    const answer =
+        'That looks like a fun scene, and I can see why it caught your eye. '
+        "I'm already imagining a playful conversation about the evening. "
+        'There is a window and a blue lamp nearby. '
+        "I'm already imagining a different ending to the story. "
+        'The person turns toward the camera for a moment. '
+        "I'm already imagining one more thing to say.";
+    final start = repetitivePhraseStart(answer);
+    expect(start, isNotNull);
+    expect(
+      answer.substring(0, start!).trimRight(),
+      contains('blue lamp nearby.'),
+    );
+    expect(answer.substring(0, start), isNot(contains('a different ending')));
+  });
+
+  test('does not cut a natural second mention of the same subject', () {
+    const answer =
+        'The blue lamp is on the table beside a book. '
+        'I like how the blue lamp makes the room feel cozy. '
+        'The person smiles and moves the book to the shelf.';
+    expect(repetitivePhraseStart(answer), isNull);
+  });
+
   test('cuts a changing-word anatomy loop at its first sentence', () {
     const lead = 'A woman is on a bed and turns toward the camera. ';
     const loop =

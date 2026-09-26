@@ -1,13 +1,13 @@
 enum InferenceProfile {
-  quick('Quick', 'Short replies and smaller images', 640, 2048, 12, 120),
-  balanced('Balanced', 'Clear answers at a moderate pace', 768, 3072, 18, 220),
+  quick('Quick', 'Short replies and smaller images', 640, 2048, 4, 100),
+  balanced('Balanced', 'Clear answers at a moderate pace', 768, 3072, 8, 160),
   detailed(
     'Detailed',
     'More visual detail and longer answers',
     1024,
     4096,
-    24,
-    400,
+    12,
+    320,
   );
 
   const InferenceProfile(
@@ -39,9 +39,9 @@ enum InferenceProfile {
   }) {
     if (!hasMedia) {
       return switch (this) {
-        InferenceProfile.quick => userLimit.clamp(80, 180),
-        InferenceProfile.balanced => userLimit.clamp(100, 400),
-        InferenceProfile.detailed => userLimit.clamp(150, 1000),
+        InferenceProfile.quick => userLimit.clamp(80, 160),
+        InferenceProfile.balanced => userLimit.clamp(100, 260),
+        InferenceProfile.detailed => userLimit.clamp(150, 700),
       };
     }
     return userLimit.clamp(60, video ? visionOutputCap ~/ 2 : visionOutputCap);

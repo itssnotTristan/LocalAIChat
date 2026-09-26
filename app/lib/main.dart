@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'glass_design.dart';
 import 'inference_profile.dart';
+import 'inference_attempt.dart';
 import 'color_picker.dart';
 import 'chat_context.dart';
 import 'fish_voice.dart';
@@ -1680,62 +1681,101 @@ class _ChatScreenState extends State<ChatScreen> {
         parts.add(LlamaImageFilePart(path: inferencePath));
       }
       input.add(LlamaResponseInputItem(role: 'user', content: parts));
-      final client = LlamaOpenAIClient(
-        engine: LibLlamaCpp(cancellation: cancellation),
-        models: {
-          'active': LlamaModelConfig(
-            modelPath: model.path,
-            mmprojPath: model.projector,
-            contextSize: model.vision && isVideo
-                ? 4096
-                : inferenceProfile.contextSize,
-            gpuLayerCount: Platform.isIOS ? inferenceProfile.iosGpuLayers : 0,
-            mmprojUseGpu: Platform.isIOS && model.vision,
-          ),
-        },
-      );
-      setState(() => status = 'Generating on this device…');
       var rawReply = '';
       var stoppedForLoop = false;
-      await for (final event in client.responses.stream(
-        model: 'active',
-        input: input,
-        instructions:
-            ChatContext.instructions(
-              global: instructions,
-              personality: chat.personality,
-              customPersonality: chat.customPersonality,
-              memory: chat.memory,
-            ) +
-            (model.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''),
-        maxOutputTokens: inferenceProfile.outputTokens(
-          maxTokens,
-          hasMedia: inferenceFrames.isNotEmpty,
-          video: isVideo,
-        ),
-        temperature: 0.65,
-        topP: 0.90,
-      )) {
+      final attempts = inferenceAttempts(
+        inferenceProfile,
+        isIos: Platform.isIOS,
+        isVideo: model.vision && isVideo,
+      );
+      for (
+        var attemptIndex = 0;
+        attemptIndex < attempts.length;
+        attemptIndex++
+      ) {
         if (cancelled) break;
-        if (event is LlamaResponseOutputTextDelta) {
-          firstWordAt ??= generationWatch.elapsed;
-          rawReply += event.delta;
-          final visible = visibleReply(rawReply);
-          final repeatedFrom = repetitiveSentenceRunStart(visible);
-          if (mounted) {
-            setState(
-              () => reply.text = repeatedFrom == null
-                  ? visible
-                  : visible.substring(0, repeatedFrom).trimRight(),
-            );
+        final attempt = attempts[attemptIndex];
+        final client = LlamaOpenAIClient(
+          engine: LibLlamaCpp(cancellation: cancellation),
+          models: {
+            'active': LlamaModelConfig(
+              modelPath: model.path,
+              mmprojPath: model.projector,
+              contextSize: attempt.contextSize,
+              gpuLayerCount: attempt.gpuLayers,
+              mmprojUseGpu: attempt.projectorOnGpu,
+            ),
+          },
+        );
+        if (mounted) {
+          setState(
+            () => status = attemptIndex == 0
+                ? 'Generating on this device…'
+                : 'Retrying with less memory…',
+          );
+        }
+        try {
+          await for (final event in client.responses.stream(
+            model: 'active',
+            input: input,
+            instructions:
+                ChatContext.instructions(
+                  global: instructions,
+                  personality: chat.personality,
+                  customPersonality: chat.customPersonality,
+                  memory: chat.memory,
+                ) +
+                (model.name.toLowerCase().contains('qwen3')
+                    ? '\n/no_think'
+                    : ''),
+            maxOutputTokens: inferenceProfile.outputTokens(
+              maxTokens,
+              hasMedia: inferenceFrames.isNotEmpty,
+              video: isVideo,
+            ),
+            temperature: 0.65,
+            topP: 0.90,
+          )) {
+            if (cancelled) break;
+            if (event is LlamaResponseOutputTextDelta) {
+              firstWordAt ??= generationWatch.elapsed;
+              rawReply += event.delta;
+              final visible = visibleReply(rawReply);
+              final sentenceStart = repetitiveSentenceRunStart(visible);
+              final phraseStart = repetitivePhraseStart(visible);
+              final repeatedFrom = switch ((sentenceStart, phraseStart)) {
+                (null, null) => null,
+                (final int start, null) => start,
+                (null, final int start) => start,
+                (final int a, final int b) => a < b ? a : b,
+              };
+              if (mounted) {
+                setState(
+                  () => reply.text = repeatedFrom == null
+                      ? visible
+                      : visible.substring(0, repeatedFrom).trimRight(),
+                );
+              }
+              if (repeatedFrom != null) {
+                stoppedForLoop = true;
+                cancellation.cancel();
+                break;
+              }
+            } else if (event is LlamaResponseFailed) {
+              throw StateError(event.error.message);
+            }
           }
-          if (repeatedFrom != null || isRepeatingReply(visible)) {
-            stoppedForLoop = true;
-            cancellation.cancel();
-            break;
+          break;
+        } catch (error) {
+          if (cancelled ||
+              rawReply.isNotEmpty ||
+              !isContextMemoryFailure(error) ||
+              attemptIndex == attempts.length - 1) {
+            rethrow;
           }
-        } else if (event is LlamaResponseFailed) {
-          throw StateError(event.error.message);
+          // The failed engine has disposed its native context by this point.
+          // Give iOS a moment to reclaim memory before loading it again.
+          await Future<void>.delayed(const Duration(milliseconds: 350));
         }
       }
       if (!cancelled &&
@@ -1772,7 +1812,11 @@ class _ChatScreenState extends State<ChatScreen> {
           input: input,
           instructions:
               '${ChatContext.instructions(global: instructions, personality: chat.personality, customPersonality: chat.customPersonality, memory: chat.memory)}\nThis turn has no attached media. Answer the user’s question conversationally and directly. Do not echo the question or describe an image or frame.\n/no_think',
-          maxOutputTokens: maxTokens,
+          maxOutputTokens: inferenceProfile.outputTokens(
+            maxTokens,
+            hasMedia: false,
+            video: false,
+          ),
           temperature: 0.7,
           topP: 0.9,
         )) {
@@ -1849,7 +1893,9 @@ class _ChatScreenState extends State<ChatScreen> {
       currentVideoPath = originalVideoPath;
       currentVideoPlaybackPath = originalVideoPlaybackPath;
       currentVideoDurationMs = originalVideoDurationMs;
-      final message = error.toString().contains('Failed to load model:')
+      final message = isContextMemoryFailure(error)
+          ? '${model.name} could not fit in iPhone memory, even after a smaller retry. Close other apps, choose Quick mode or a smaller vision model, then send again. Your draft and media are saved.'
+          : error.toString().contains('Failed to load model:')
           ? 'Could not load ${model.name}. Close other apps and retry; if it keeps failing, remove and download or import that model again. Your draft is saved.'
           : 'Local generation failed: $error';
       showProblem(message);

@@ -34,17 +34,43 @@ bool isDetachedMediaReply(String answer, String question) {
 }
 
 bool isRepeatingReply(String text) {
-  final words = RegExp(
-    r"[\p{L}\p{N}']+",
+  return repetitivePhraseStart(text) != null;
+}
+
+/// Returns the start of the redundant wording so the UI can keep the useful
+/// part of a reply. An exact eight-word repeat is enough on its own. Shorter
+/// phrases require three separated uses and a distinctive word; this catches
+/// changing endings such as "I'm already imagining ..." without cutting a
+/// normal answer that refers to the same subject twice.
+int? repetitivePhraseStart(String text) {
+  final matches = RegExp(
+    r"[\p{L}\p{N}’']+",
     unicode: true,
-  ).allMatches(text.toLowerCase()).map((match) => match.group(0)!).toList();
-  if (words.length < 28) return false;
-  final tail = words.sublist(words.length - 8).join(' ');
-  var matches = 0;
-  for (var i = 0; i <= words.length - 8; i++) {
-    if (words.sublist(i, i + 8).join(' ') == tail) matches++;
+  ).allMatches(text.toLowerCase()).toList();
+  if (matches.length < 28) return null;
+  final words = matches.map((match) => match.group(0)!).toList();
+  final longPhrases = <String, int>{};
+  final shortPhrases = <String, List<int>>{};
+  for (var i = 0; i < words.length; i++) {
+    if (i + 8 <= words.length) {
+      final key = words.sublist(i, i + 8).join(' ');
+      final previous = longPhrases[key];
+      if (previous != null && i - previous >= 8) {
+        return matches[i].start;
+      }
+      longPhrases.putIfAbsent(key, () => i);
+    }
+    if (i + 3 > words.length ||
+        !words.sublist(i, i + 3).any((word) => word.length >= 7)) {
+      continue;
+    }
+    final key = words.sublist(i, i + 3).join(' ');
+    final starts = shortPhrases.putIfAbsent(key, () => []);
+    if (starts.isNotEmpty && i - starts.last < 7) continue;
+    starts.add(i);
+    if (starts.length >= 3) return matches[starts[1]].start;
   }
-  return matches >= 2;
+  return null;
 }
 
 /// Returns the beginning of a run of near-identical sentences, even when the
