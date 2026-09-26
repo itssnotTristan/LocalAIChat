@@ -1,6 +1,87 @@
 import Flutter
 import UIKit
 import AVFoundation
+import PhotosUI
+import UniformTypeIdentifiers
+
+/// PHPicker lets the user choose individual photos and videos without granting
+/// this app access to their entire library.
+final class PhotoPickerBridge: NSObject, PHPickerViewControllerDelegate {
+  private var pending: FlutterResult?
+  private var picker: PHPickerViewController?
+  private var requestedType = "image"
+
+  func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard call.method == "pick" else {
+      result(FlutterMethodNotImplemented)
+      return
+    }
+    guard pending == nil else {
+      result(FlutterError(code: "picker_busy", message: "Finish choosing the current item first.", details: nil))
+      return
+    }
+    requestedType = (call.arguments as? [String: String])?["type"] == "video" ? "video" : "image"
+    var configuration = PHPickerConfiguration(photoLibrary: .shared())
+    configuration.selectionLimit = 1
+    configuration.filter = requestedType == "video" ? .videos : .images
+    configuration.preferredAssetRepresentationMode = .current
+    let newPicker = PHPickerViewController(configuration: configuration)
+    newPicker.delegate = self
+    guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+          let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+      result(FlutterError(code: "picker_unavailable", message: "Could not open Photos on this iPhone.", details: nil))
+      return
+    }
+    var presenter = root
+    while let presented = presenter.presentedViewController { presenter = presented }
+    pending = result
+    picker = newPicker
+    presenter.present(newPicker, animated: true)
+  }
+
+  func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+    picker.dismiss(animated: true)
+    guard let provider = results.first?.itemProvider else {
+      finish(nil)
+      return
+    }
+    let expected: UTType = requestedType == "video" ? .movie : .image
+    guard let identifier = provider.registeredTypeIdentifiers.first(where: {
+      UTType($0)?.conforms(to: expected) == true
+    }) else {
+      finish(FlutterError(code: "picker_type", message: "The selected media could not be opened.", details: nil))
+      return
+    }
+    provider.loadFileRepresentation(forTypeIdentifier: identifier) { [weak self] url, error in
+      guard let self = self else { return }
+      guard let url = url else {
+        DispatchQueue.main.async {
+          self.finish(FlutterError(code: "picker_load", message: error?.localizedDescription ?? "Could not load the selected media.", details: nil))
+        }
+        return
+      }
+      let fileExtension = url.pathExtension.isEmpty ? (self.requestedType == "video" ? "mov" : "jpg") : url.pathExtension
+      let destination = FileManager.default.temporaryDirectory
+        .appendingPathComponent("fluxlira-picked-\(UUID().uuidString)")
+        .appendingPathExtension(fileExtension)
+      do {
+        try FileManager.default.copyItem(at: url, to: destination)
+        DispatchQueue.main.async { self.finish(destination.path) }
+      } catch {
+        DispatchQueue.main.async {
+          self.finish(FlutterError(code: "picker_copy", message: error.localizedDescription, details: nil))
+        }
+      }
+    }
+  }
+
+  private func finish(_ value: Any?) {
+    let callback = pending
+    pending = nil
+    picker = nil
+    callback?(value)
+  }
+}
 
 private struct ModelTransferRecord: Codable {
   var id: String
@@ -319,6 +400,7 @@ final class SystemSpeechBridge: NSObject, AVSpeechSynthesizerDelegate {
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let modelTransfers = ModelTransferBridge()
+  private let photoPicker = PhotoPickerBridge()
 
   override func application(_ application: UIApplication,
                             handleEventsForBackgroundURLSession identifier: String,
@@ -338,6 +420,13 @@ final class SystemSpeechBridge: NSObject, AVSpeechSynthesizerDelegate {
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    let photoChannel = FlutterMethodChannel(
+      name: "local_ai_chat/photo_picker",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    photoChannel.setMethodCallHandler { [photoPicker = self.photoPicker] call, result in
+      photoPicker.handle(call, result: result)
+    }
     let imageStudioBridge = ImageStudioBridge()
     let systemSpeechBridge = SystemSpeechBridge()
     let speechChannel = FlutterMethodChannel(

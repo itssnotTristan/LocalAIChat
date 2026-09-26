@@ -26,6 +26,17 @@ bool isBackgroundReplacement(String prompt) {
           .hasMatch(request);
 }
 
+/// Keep the source image in the diffusion pipeline. A scene request is still
+/// an image-to-image edit, not an empty background plus a pasted subject.
+String wholeImageEditPrompt(String prompt) {
+  final request = prompt.trim();
+  if (!isBackgroundReplacement(request)) return request;
+  return 'Photorealistic full-frame photograph of the same subject as the input image, '
+      'naturally placed in the requested environment. $request. '
+      'The body, scene, lighting, shadows, scale and camera perspective are coherent. '
+      'No pasted cutout, floating body, collage, or visible mask edge.';
+}
+
 /// Removes instructions that would make the background model draw a new person.
 String backgroundScenePrompt(String prompt) {
   var scene = prompt.trim();

@@ -22,6 +22,7 @@ import 'speech_service.dart';
 import 'self_test.dart';
 import 'gguf_info.dart';
 import 'media_viewer.dart';
+import 'media_picker.dart';
 import 'media_reply_prompt.dart';
 import 'offline_library.dart';
 import 'offline_library_page.dart';
@@ -35,6 +36,9 @@ import 'speech_download.dart';
 import 'video_duration.dart';
 import 'video_sampler.dart';
 import 'voice_turn_detector.dart';
+import 'vision_pair.dart';
+import 'user_profile.dart';
+import 'user_profile_page.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -176,7 +180,10 @@ class LocalModel {
   String name;
   String path;
   String? projector;
-  bool get vision => projector != null && projector!.isNotEmpty;
+  bool get vision =>
+      projector != null &&
+      projector!.isNotEmpty &&
+      !knownVisionPairMismatch(path, projector!);
   Map<String, dynamic> toJson() => {
     'name': name,
     'path': path,
@@ -317,6 +324,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   String? modelPath;
   String? chatId;
   String status = 'Loading local data…';
+  UserProfile userProfile = const UserProfile();
+  bool dataLoaded = false;
+  String? loadError;
   String instructions = defaultInstructions;
   bool busy = false;
   bool cancelled = false;
@@ -326,7 +336,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   InferenceProfile inferenceProfile = InferenceProfile.balanced;
   MediaReplyStyle mediaReplyStyle = MediaReplyStyle.conversational;
   bool routeTextToChatModel = true;
-  int callPauseMilliseconds = 1000;
+  int callPauseMilliseconds = 1200;
   String themeName = 'Aurora';
   Color customColor = const Color(0xFF55C8FF);
   Color starColor = const Color(0xFFB6DCFF);
@@ -351,6 +361,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final ValueNotifier<String> callStatus = ValueNotifier('Ready to call');
   int callEpoch = 0;
   bool callSendNow = false;
+  bool callInterruptNow = false;
   int voiceEpoch = 0;
   final ModelDownloader downloader = ModelDownloader();
   final BackgroundModelDownloads backgroundDownloads =
@@ -374,7 +385,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final available = models
         .where(
           (model) =>
-              uncensoredUnlocked ||
+              (uncensoredUnlocked && userProfile.isAdult) ||
               !isUncensoredModelName('${model.name} ${model.path}'),
         )
         .toList();
@@ -515,6 +526,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> showUncensoredAccess() async {
+    if (!userProfile.isAdult) {
+      showProblem(
+        'Enter an age of 18 or older in your profile before using Uncensored Mode.',
+      );
+      return;
+    }
     var enteredCode = '';
     var error = '';
     await showModalBottomSheet<void>(
@@ -964,6 +981,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> load() async {
+    loadError = null;
+    models.clear();
+    chats.clear();
+    attachments.clear();
     try {
       dataDir = await getApplicationSupportDirectory();
       library = OfflineLibraryRepository(dataDir!, rootBundle);
@@ -1008,6 +1029,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           currentVideoDurationMs = data['currentVideoDurationMs'] as int?;
         }
         instructions = data['instructions'] as String? ?? instructions;
+        userProfile = UserProfile.fromJson(
+          data['userProfile'] is Map
+              ? Map<String, dynamic>.from(data['userProfile'] as Map)
+              : null,
+        );
         if (routingVersion < 3 &&
             (instructions ==
                     'You are a private, helpful local assistant. Answer directly and honestly.' ||
@@ -1032,7 +1058,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           data['mediaReplyStyle'] as String?,
         );
         routeTextToChatModel = data['routeTextToChatModel'] as bool? ?? true;
-        callPauseMilliseconds = (data['callPauseMilliseconds'] as int? ?? 1000)
+        callPauseMilliseconds = (data['callPauseMilliseconds'] as int? ?? 1200)
             .clamp(650, 1800);
         themeName = data['themeName'] as String? ?? 'Aurora';
         if (!GlassPalette.presets.containsKey(themeName)) themeName = 'Aurora';
@@ -1217,17 +1243,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       } catch (_) {
         uncensoredUnlocked = false;
       }
+      if (!userProfile.isAdult && uncensoredUnlocked) {
+        await UncensoredAccess.lock();
+        uncensoredUnlocked = false;
+      }
       try {
         fishHasKey = await FishVoice.hasKey;
       } catch (_) {
         fishHasKey = false;
       }
       if (mounted) {
-        setState(
-          () => status = models.isEmpty
+        setState(() {
+          dataLoaded = true;
+          status = models.isEmpty
               ? 'Get a local model to begin. Chat stays on this device.'
-              : 'Ready. All chat inference stays on this device.',
-        );
+              : 'Ready. All chat inference stays on this device.';
+        });
       }
       await save();
       if (Platform.isIOS) {
@@ -1239,9 +1270,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     } catch (error) {
       if (mounted)
-        setState(
-          () => status = 'Could not load local data: ' + error.toString(),
-        );
+        setState(() {
+          dataLoaded = true;
+          loadError = 'Could not load local data: $error';
+          status = loadError!;
+        });
     }
   }
 
@@ -1270,6 +1303,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         'currentVideoPlaybackPath': currentVideoPlaybackPath,
         'currentVideoDurationMs': currentVideoDurationMs,
         'instructions': instructions,
+        'userProfile': userProfile.toJson(),
         'frameCount': frameCount,
         'maxTokens': maxTokens,
         'inferenceProfile': inferenceProfile.name,
@@ -1474,8 +1508,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     decoration: const InputDecoration(labelText: 'Personality'),
                     items: ChatContext.personalities.keys
                         .map(
-                          (name) =>
-                              DropdownMenuItem(value: name, child: Text(name)),
+                          (name) => DropdownMenuItem(
+                            value: name,
+                            enabled: name != 'Horny' || userProfile.isAdult,
+                            child: Text(name),
+                          ),
                         )
                         .toList(),
                     onChanged: (value) =>
@@ -1513,6 +1550,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
             FilledButton(
               onPressed: () {
+                if (personality == 'Horny' && !userProfile.isAdult) {
+                  showProblem(
+                    'Adult personalities require a reported age of 18 or older.',
+                  );
+                  return;
+                }
                 setState(() {
                   current.personality = personality;
                   current.customPersonality = custom.text.trim();
@@ -1605,6 +1648,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       final info = await GgufInfo.read(path);
       if (projector && selectedModel == null) return;
+      if (projector && knownVisionPairMismatch(selectedModel!.path, path)) {
+        throw const FormatException(
+          'That projector belongs to a different vision model. Choose the matching mmproj GGUF for this model.',
+        );
+      }
       if (!projector && models.any((item) => item.path == path)) {
         setState(() => status = 'That model is already in the library.');
         return;
@@ -1738,8 +1786,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> attachImage() async {
-    final result = await FilePicker.platform.pickFiles(type: FileType.image);
-    final path = result?.files.single.path;
+    final path = await pickLocalMedia(context, video: false);
     if (path == null) return;
     try {
       final owned = await copyIntoApp(path, 'media');
@@ -1768,8 +1815,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> attachVideo() async {
-    final result = await FilePicker.platform.pickFiles(type: FileType.video);
-    final path = result?.files.single.path;
+    final path = await pickLocalMedia(context, video: true);
     if (path == null) return;
     if (samplingVideo || dataDir == null) return;
     if (currentVideoPath != null) {
@@ -1957,7 +2003,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     final prompt = draft.text.trim();
-    if (!uncensoredUnlocked && isExplicitAdultTopic(prompt)) {
+    if ((!uncensoredUnlocked || !userProfile.isAdult) &&
+        isExplicitAdultTopic(prompt)) {
       showProblem(
         'This adult topic requires Uncensored Mode. Your draft is saved.',
       );
@@ -2037,7 +2084,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         );
       }
     }
-    if (!uncensoredUnlocked &&
+    if ((!uncensoredUnlocked || !userProfile.isAdult) &&
         isUncensoredModelName('${model.name} ${model.path}')) {
       showProblem('This model requires Uncensored Mode. Your draft is saved.');
       await showUncensoredAccess();
@@ -2199,6 +2246,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       input.add(LlamaResponseInputItem(role: 'user', content: parts));
       var rawReply = '';
       var stoppedForLoop = false;
+      final failedVisionModels = <String>{};
       final attempts = inferenceAttempts(
         inferenceProfile,
         isIos: Platform.isIOS,
@@ -2237,10 +2285,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             instructions:
                 ChatContext.instructions(
                   global: instructions,
-                  personality: chat.personality,
+                  personality:
+                      !userProfile.isAdult && chat.personality == 'Horny'
+                      ? 'Default'
+                      : chat.personality,
                   customPersonality: chat.customPersonality,
                   memory: chat.memory,
                 ) +
+                (userProfile.modelInstructions.isEmpty
+                    ? ''
+                    : '\n${userProfile.modelInstructions}') +
                 '\nThe current local date and time on this device are ${DateTime.now().toIso8601String()}. Use this for calendar questions.' +
                 libraryContext +
                 (previousAssistant != null &&
@@ -2295,6 +2349,50 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           }
           break;
         } catch (error) {
+          if (!cancelled &&
+              rawReply.isEmpty &&
+              inferenceFrames.isNotEmpty &&
+              isProjectorInitFailure(error)) {
+            failedVisionModels.add(model.path);
+            final alternatives = models
+                .where(
+                  (candidate) =>
+                      !failedVisionModels.contains(candidate.path) &&
+                      candidate.vision &&
+                      File(candidate.path).existsSync() &&
+                      File(candidate.projector!).existsSync() &&
+                      (userProfile.isAdult && uncensoredUnlocked ||
+                          !isUncensoredModelName(
+                            '${candidate.name} ${candidate.path}',
+                          )),
+                )
+                .toList();
+            alternatives.sort((a, b) {
+              int rank(LocalModel value) => value.name.contains('Qwen3 VL')
+                  ? 0
+                  : value.name.contains('Qwen3.5')
+                  ? 1
+                  : value.name.contains('SmolVLM')
+                  ? 2
+                  : 3;
+              return rank(a).compareTo(rank(b));
+            });
+            if (alternatives.isNotEmpty) {
+              model = alternatives.first;
+              if (mounted) {
+                setState(
+                  () => status =
+                      'That vision projector failed. Trying ${model.name}…',
+                );
+              }
+              await Future<void>.delayed(const Duration(milliseconds: 300));
+              attemptIndex = -1;
+              continue;
+            }
+            throw StateError(
+              'The vision model could not load its projector. Choose a matching model and mmproj in Models, or install the starter vision model. Your message and image are still available.',
+            );
+          }
           if (cancelled ||
               rawReply.isNotEmpty ||
               !isContextMemoryFailure(error) ||
@@ -2371,7 +2469,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           model: 'retry',
           input: retryInput,
           instructions:
-              '${ChatContext.instructions(global: instructions, personality: chat.personality, customPersonality: chat.customPersonality, memory: chat.memory)}\nThe current local date and time on this device are ${DateTime.now().toIso8601String()}.$libraryContext\nThe previous answer failed to address the latest message. Start fresh from the user’s latest words. Do not reuse earlier assistant wording, guess motives, echo the user, or describe old media as if you can see it now. If the user only states a new observation, acknowledge it briefly without inventing an explanation.${retryModel.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''}',
+              '${ChatContext.instructions(global: instructions, personality: !userProfile.isAdult && chat.personality == 'Horny' ? 'Default' : chat.personality, customPersonality: chat.customPersonality, memory: chat.memory)}\n${userProfile.modelInstructions}\nThe current local date and time on this device are ${DateTime.now().toIso8601String()}.$libraryContext\nThe previous answer failed to address the latest message. Start fresh from the user’s latest words. Do not reuse earlier assistant wording, guess motives, echo the user, or describe old media as if you can see it now. If the user only states a new observation, acknowledge it briefly without inventing an explanation.${retryModel.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''}',
           maxOutputTokens: inferenceProfile
               .outputTokens(maxTokens, hasMedia: false, video: false)
               .clamp(60, 180),
@@ -2582,6 +2680,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> endVoiceCall() async {
     callEpoch++;
     callActive = false;
+    callInterruptNow = false;
     stopGeneration();
     final service = speech;
     if (service != null) {
@@ -2602,23 +2701,30 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       '${dataDir!.path}${Platform.pathSeparator}recordings',
     );
     await recordings.create(recursive: true);
+    String? carriedRecording;
     while (mounted && callActive && epoch == callEpoch) {
       if (callMuted) {
+        if (service.recording) await service.stopRecording();
+        carriedRecording = null;
         callStatus.value = 'Microphone muted';
         await Future.delayed(const Duration(milliseconds: 200));
         continue;
       }
       try {
         callStatus.value = 'Listening · sends after a pause';
+        final continuing = carriedRecording != null && service.recording;
         final path =
+            carriedRecording ??
             '${recordings.path}${Platform.pathSeparator}call_${DateTime.now().microsecondsSinceEpoch}.wav';
-        await service.startRecording(path);
+        carriedRecording = null;
+        if (!continuing) await service.startRecording(path);
         final started = DateTime.now();
         final detector = VoiceTurnDetector(
           pauseMilliseconds: callPauseMilliseconds,
         );
+        if (continuing) detector.seedSpeech(0);
         while (callActive && epoch == callEpoch && !callMuted) {
-          await Future.delayed(const Duration(milliseconds: 120));
+          await Future.delayed(const Duration(milliseconds: 80));
           final level = await service.microphoneLevel();
           final elapsed = DateTime.now().difference(started);
           final finished = detector.add(level, elapsed.inMilliseconds);
@@ -2661,8 +2767,52 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           }
           continue;
         }
-        callStatus.value = 'Speaking…';
-        await service.playFile(wav);
+        callStatus.value = 'Speaking · talk or tap Interrupt';
+        callInterruptNow = false;
+        final bargePath =
+            '${recordings.path}${Platform.pathSeparator}barge_${DateTime.now().microsecondsSinceEpoch}.wav';
+        var canListen = false;
+        try {
+          await service.startRecording(bargePath, interruptPlayback: false);
+          canListen = true;
+        } catch (_) {
+          // Playback must still work on devices that disallow simultaneous
+          // recording. The visible Interrupt control remains available.
+        }
+        var playbackFinished = false;
+        final playback = service
+            .playFile(wav)
+            .whenComplete(() => playbackFinished = true);
+        final bargeStarted = DateTime.now();
+        final bargeDetector = VoiceBargeInDetector();
+        var interrupted = false;
+        while (callActive && epoch == callEpoch && !playbackFinished) {
+          await Future.delayed(const Duration(milliseconds: 80));
+          if (callInterruptNow) {
+            interrupted = true;
+            break;
+          }
+          if (!canListen || callMuted) continue;
+          final level = await service.microphoneLevel();
+          if (bargeDetector.add(
+            level,
+            DateTime.now().difference(bargeStarted).inMilliseconds,
+          )) {
+            interrupted = true;
+            break;
+          }
+        }
+        if (interrupted) await service.stopSpeaking();
+        await playback;
+        callInterruptNow = false;
+        if (canListen && service.recording) {
+          if (interrupted && callActive && epoch == callEpoch && !callMuted) {
+            carriedRecording = bargePath;
+            callStatus.value = 'Listening · finish your thought';
+          } else {
+            await service.stopRecording();
+          }
+        }
       } catch (error) {
         if (service.recording) {
           try {
@@ -2695,6 +2845,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     callEpoch++;
     final epoch = callEpoch;
     callMuted = false;
+    callInterruptNow = false;
     callActive = true;
     callStatus.value = 'Starting local call…';
     unawaited(runVoiceCall(epoch));
@@ -2783,6 +2934,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           onPressed: () => callSendNow = true,
                           icon: const Icon(Icons.send),
                           label: const Text('Send now'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () => callInterruptNow = true,
+                          icon: const Icon(Icons.hearing_disabled_outlined),
+                          label: const Text('Interrupt'),
                         ),
                         FilledButton.icon(
                           onPressed: () => Navigator.pop(dialogContext),
@@ -2879,239 +3035,252 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: SizedBox(
-              height: MediaQuery.sizeOf(context).height * 0.78,
-              child: Column(
+              height: MediaQuery.sizeOf(context).height * 0.82,
+              child: ListView(
                 children: [
                   Text(
                     'Local models',
                     style: Theme.of(context).textTheme.headlineSmall,
                   ),
-                  const Text(
-                    'Import a GGUF model. Vision models also need their matching mmproj GGUF.',
+                  const SizedBox(height: 8),
+                  Text(
+                    'Installed models',
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
-                  Wrap(
-                    spacing: 8,
-                    children: [
-                      OutlinedButton.icon(
-                        onPressed: () async {
-                          await importModel(projector: false);
-                          update(() {});
-                        },
-                        icon: const Icon(Icons.add),
-                        label: const Text('Import model'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: () async {
-                          await showUncensoredAccess();
-                          update(() {});
-                        },
-                        icon: Icon(
-                          uncensoredUnlocked
-                              ? Icons.lock_open_outlined
-                              : Icons.lock_outline,
-                        ),
-                        label: Text(
-                          uncensoredUnlocked
-                              ? 'Uncensored Mode · owner preview'
-                              : 'Unlock Uncensored Mode',
-                        ),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed:
-                            selectedModel == null || modelPath == autoModelPath
-                            ? null
-                            : () async {
-                                await importModel(projector: true);
-                                update(() {});
-                              },
-                        icon: const Icon(Icons.image),
-                        label: const Text('Add projector'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: downloading
-                            ? null
-                            : () async {
-                                await downloadEverydayModel();
-                                update(() {});
-                              },
-                        icon: const Icon(Icons.chat_bubble_outline),
-                        label: const Text('Get better everyday chat · 2 GB'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: downloading
-                            ? null
-                            : () async {
-                                await downloadStarterModel();
-                                update(() {});
-                              },
-                        icon: const Icon(Icons.download),
-                        label: const Text('Get starter vision model'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: downloading
-                            ? null
-                            : () async {
-                                await downloadDetailedVisionModel();
-                                update(() {});
-                              },
-                        icon: const Icon(Icons.visibility_outlined),
-                        label: const Text('Get detailed vision model · 3 GB'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: downloading
-                            ? null
-                            : () async {
-                                await downloadAdultVisionModel();
-                                update(() {});
-                              },
-                        icon: const Icon(Icons.visibility),
-                        label: const Text('Get adult-capable vision · 3 GB'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: downloading
-                            ? null
-                            : () async {
-                                await downloadRoleplayModel();
-                                update(() {});
-                              },
-                        icon: const Icon(Icons.theater_comedy_outlined),
-                        label: const Text('Get adult roleplay model · 2.5 GB'),
-                      ),
-                      if (downloading)
-                        TextButton(
-                          onPressed: () {
-                            downloader.cancel();
-                            update(() {});
-                          },
-                          child: const Text('Cancel download'),
-                        ),
-                    ],
-                  ),
-                  if (Platform.isIOS) ...[
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Downloads continue while this app is in the background. Open it again to verify and install finished models.',
-                    ),
-                    ValueListenableBuilder<List<BackgroundTransferStatus>>(
-                      valueListenable: backgroundTransfers,
-                      builder: (context, transfers, _) => Column(
-                        children: transfers.map((transfer) {
-                          final known = transfer.expected > 0;
-                          final progress = known
-                              ? (transfer.received / transfer.expected).clamp(
-                                  0.0,
-                                  1.0,
-                                )
-                              : null;
-                          return ListTile(
-                            dense: true,
-                            title: Text(
-                              transfer.id.replaceFirst(RegExp(r'^[^-]+-'), ''),
-                            ),
-                            subtitle: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  transfer.state == 'downloading'
-                                      ? '${(transfer.received / 1048576).round()} MiB downloaded'
-                                      : transfer.state == 'downloaded'
-                                      ? 'Downloaded · checking checksum when open'
-                                      : '${transfer.state}${transfer.error.isEmpty ? '' : ': ${transfer.error}'}',
-                                ),
-                                if (transfer.state == 'downloading')
-                                  LinearProgressIndicator(value: progress),
-                              ],
-                            ),
-                            trailing: transfer.state == 'downloading'
-                                ? IconButton(
-                                    tooltip: 'Cancel download',
-                                    icon: const Icon(Icons.close),
-                                    onPressed: () async {
-                                      await backgroundDownloads.cancel(
-                                        transfer.id,
-                                      );
-                                      await syncBackgroundDownloads();
-                                    },
-                                  )
-                                : null,
-                          );
-                        }).toList(),
+                  if (models.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Text(
+                        'No models installed yet. Open Add or download models below.',
                       ),
                     ),
-                  ],
-                  Expanded(
-                    child: ListView(
-                      children: [
-                        if (models.length > 1)
-                          RadioListTile<String>(
-                            title: const Text('Auto · text + vision'),
-                            subtitle: const Text(
-                              'Use the text model for chat and the vision model for attached media.',
-                            ),
-                            value: autoModelPath,
-                            groupValue: modelPath,
-                            onChanged: (value) {
-                              setState(() => modelPath = value);
-                              update(() {});
-                              unawaited(save());
-                            },
+                  if (models.length > 1)
+                    RadioListTile<String>(
+                      title: const Text('Auto · text + vision'),
+                      subtitle: const Text(
+                        'Choose a model automatically for text and attached media.',
+                      ),
+                      value: autoModelPath,
+                      groupValue: modelPath,
+                      onChanged: (value) {
+                        setState(() => modelPath = value);
+                        update(() {});
+                        unawaited(save());
+                      },
+                    ),
+                  ...models.map(
+                    (model) => RadioListTile<String>(
+                      title: Text(model.name),
+                      subtitle: Text(
+                        '${model.vision ? 'Text + vision' : 'Text only'} · ${model.path}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      secondary: PopupMenuButton<String>(
+                        tooltip: 'Model actions',
+                        icon: const Icon(Icons.more_vert),
+                        onSelected: (action) async {
+                          if (action == 'inspect') await inspectModel(model);
+                          if (action == 'rename') await renameModel(model);
+                          if (action == 'remove') await removeModel(model);
+                          update(() {});
+                        },
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: 'inspect',
+                            child: Text('Inspect GGUF'),
                           ),
-                        ...models.map(
-                          (model) => RadioListTile<String>(
-                            title: Text(model.name),
-                            subtitle: Text(
-                              (model.vision
-                                      ? 'Text + vision · '
-                                      : 'Text only · ') +
-                                  model.path,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
+                          PopupMenuItem(value: 'rename', child: Text('Rename')),
+                          PopupMenuItem(value: 'remove', child: Text('Remove')),
+                        ],
+                      ),
+                      value: model.path,
+                      groupValue: modelPath,
+                      onChanged: (value) async {
+                        if (!uncensoredUnlocked &&
+                            isUncensoredModelName(
+                              '${model.name} ${model.path}',
+                            )) {
+                          await showUncensoredAccess();
+                          if (!uncensoredUnlocked) return;
+                        }
+                        setState(() => modelPath = value);
+                        update(() {});
+                        unawaited(save());
+                      },
+                    ),
+                  ),
+                  const Divider(),
+                  ExpansionTile(
+                    title: const Text('Add or download models'),
+                    subtitle: const Text(
+                      'Import GGUF files or install a recommended model',
+                    ),
+                    children: [
+                      const Text(
+                        'Vision models also need their matching mmproj GGUF.',
+                      ),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: () async {
+                              await importModel(projector: false);
+                              update(() {});
+                            },
+                            icon: const Icon(Icons.add),
+                            label: const Text('Import model'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: () async {
+                              await showUncensoredAccess();
+                              update(() {});
+                            },
+                            icon: Icon(
+                              uncensoredUnlocked
+                                  ? Icons.lock_open_outlined
+                                  : Icons.lock_outline,
                             ),
-                            secondary: PopupMenuButton<String>(
-                              tooltip: 'Model actions',
-                              icon: const Icon(Icons.more_vert),
-                              onSelected: (action) async {
-                                if (action == 'inspect')
-                                  await inspectModel(model);
-                                if (action == 'rename')
-                                  await renameModel(model);
-                                if (action == 'remove')
-                                  await removeModel(model);
+                            label: Text(
+                              uncensoredUnlocked
+                                  ? 'Uncensored Mode · owner preview'
+                                  : 'Unlock Uncensored Mode',
+                            ),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed:
+                                selectedModel == null ||
+                                    modelPath == autoModelPath
+                                ? null
+                                : () async {
+                                    await importModel(projector: true);
+                                    update(() {});
+                                  },
+                            icon: const Icon(Icons.image),
+                            label: const Text('Add projector'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: downloading
+                                ? null
+                                : () async {
+                                    await downloadEverydayModel();
+                                    update(() {});
+                                  },
+                            icon: const Icon(Icons.chat_bubble_outline),
+                            label: const Text(
+                              'Get better everyday chat · 2 GB',
+                            ),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: downloading
+                                ? null
+                                : () async {
+                                    await downloadStarterModel();
+                                    update(() {});
+                                  },
+                            icon: const Icon(Icons.download),
+                            label: const Text('Get starter vision model'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: downloading
+                                ? null
+                                : () async {
+                                    await downloadDetailedVisionModel();
+                                    update(() {});
+                                  },
+                            icon: const Icon(Icons.visibility_outlined),
+                            label: const Text(
+                              'Get detailed vision model · 3 GB',
+                            ),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: downloading
+                                ? null
+                                : () async {
+                                    await downloadAdultVisionModel();
+                                    update(() {});
+                                  },
+                            icon: const Icon(Icons.visibility),
+                            label: const Text(
+                              'Get adult-capable vision · 3 GB',
+                            ),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: downloading
+                                ? null
+                                : () async {
+                                    await downloadRoleplayModel();
+                                    update(() {});
+                                  },
+                            icon: const Icon(Icons.theater_comedy_outlined),
+                            label: const Text(
+                              'Get adult roleplay model · 2.5 GB',
+                            ),
+                          ),
+                          if (downloading)
+                            TextButton(
+                              onPressed: () {
+                                downloader.cancel();
                                 update(() {});
                               },
-                              itemBuilder: (context) => const [
-                                PopupMenuItem(
-                                  value: 'inspect',
-                                  child: Text('Inspect GGUF'),
-                                ),
-                                PopupMenuItem(
-                                  value: 'rename',
-                                  child: Text('Rename'),
-                                ),
-                                PopupMenuItem(
-                                  value: 'remove',
-                                  child: Text('Remove'),
-                                ),
-                              ],
+                              child: const Text('Cancel download'),
                             ),
-                            value: model.path,
-                            groupValue: modelPath,
-                            onChanged: (value) async {
-                              if (!uncensoredUnlocked &&
-                                  isUncensoredModelName(
-                                    '${model.name} ${model.path}',
-                                  )) {
-                                await showUncensoredAccess();
-                                if (!uncensoredUnlocked) return;
-                              }
-                              setState(() => modelPath = value);
-                              update(() {});
-                              unawaited(save());
-                            },
+                        ],
+                      ),
+                      if (Platform.isIOS) ...[
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Downloads continue while this app is in the background. Open it again to verify and install finished models.',
+                        ),
+                        ValueListenableBuilder<List<BackgroundTransferStatus>>(
+                          valueListenable: backgroundTransfers,
+                          builder: (context, transfers, _) => Column(
+                            children: transfers.map((transfer) {
+                              final known = transfer.expected > 0;
+                              final progress = known
+                                  ? (transfer.received / transfer.expected)
+                                        .clamp(0.0, 1.0)
+                                  : null;
+                              return ListTile(
+                                dense: true,
+                                title: Text(
+                                  transfer.id.replaceFirst(
+                                    RegExp(r'^[^-]+-'),
+                                    '',
+                                  ),
+                                ),
+                                subtitle: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      transfer.state == 'downloading'
+                                          ? '${(transfer.received / 1048576).round()} MiB downloaded'
+                                          : transfer.state == 'downloaded'
+                                          ? 'Downloaded · checking checksum when open'
+                                          : '${transfer.state}${transfer.error.isEmpty ? '' : ': ${transfer.error}'}',
+                                    ),
+                                    if (transfer.state == 'downloading')
+                                      LinearProgressIndicator(value: progress),
+                                  ],
+                                ),
+                                trailing: transfer.state == 'downloading'
+                                    ? IconButton(
+                                        tooltip: 'Cancel download',
+                                        icon: const Icon(Icons.close),
+                                        onPressed: () async {
+                                          await backgroundDownloads.cancel(
+                                            transfer.id,
+                                          );
+                                          await syncBackgroundDownloads();
+                                        },
+                                      )
+                                    : null,
+                              );
+                            }).toList(),
                           ),
                         ),
                       ],
-                    ),
+                    ],
                   ),
                 ],
               ),
@@ -3186,6 +3355,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  ListTile(
+                    leading: const Icon(Icons.person_outline),
+                    title: const Text('Your profile'),
+                    subtitle: const Text(
+                      'Age, gender and pronouns · stored on this device',
+                    ),
+                    onTap: () => unawaited(showProfileEditor()),
+                  ),
                   ExpansionTile(
                     title: const Text('Chat and video'),
                     children: [
@@ -3482,9 +3659,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                     : 'Change photo',
                               ),
                               onPressed: () async {
-                                final picked = await FilePicker.platform
-                                    .pickFiles(type: FileType.image);
-                                final path = picked?.files.single.path;
+                                final path = await pickLocalMedia(
+                                  context,
+                                  video: false,
+                                );
                                 if (path == null || !context.mounted) return;
                                 update(() {
                                   selectedPhotoPath = path;
@@ -3709,8 +3887,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             child: Text('0.7 seconds · quick'),
                           ),
                           DropdownMenuItem(
+                            value: 1200,
+                            child: Text('1.2 seconds · natural'),
+                          ),
+                          DropdownMenuItem(
                             value: 1000,
-                            child: Text('1 second · natural'),
+                            child: Text('1 second'),
                           ),
                           DropdownMenuItem(
                             value: 1600,
@@ -3992,6 +4174,33 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     fishKeyController.dispose();
   }
 
+  Future<void> updateUserProfile(UserProfile next) async {
+    final previous = userProfile;
+    try {
+      if (!next.isAdult) {
+        await UncensoredAccess.lock();
+        uncensoredUnlocked = false;
+      }
+      userProfile = next;
+      await save();
+      if (mounted) setState(() {});
+    } catch (_) {
+      userProfile = previous;
+      if (mounted) setState(() {});
+      rethrow;
+    }
+  }
+
+  Future<void> showProfileEditor() async {
+    if (!mounted) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) =>
+            UserProfilePage(initial: userProfile, onSave: updateUserProfile),
+      ),
+    );
+  }
+
   Widget videoPreview(
     String playbackPath,
     String? posterPath, {
@@ -4144,6 +4353,43 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    if (!dataLoaded) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (loadError != null) {
+      return Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('FluxLira could not open its local data.'),
+                  const SizedBox(height: 12),
+                  Text(loadError!, textAlign: TextAlign.center),
+                  const SizedBox(height: 16),
+                  FilledButton(
+                    onPressed: () {
+                      setState(() => dataLoaded = false);
+                      unawaited(load());
+                    },
+                    child: const Text('Try again'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    if (!userProfile.setupComplete) {
+      return UserProfilePage(
+        initial: userProfile,
+        firstRun: true,
+        onSave: updateUserProfile,
+      );
+    }
     final palette = GlassPalette.resolve(themeName, customColor);
     final light = palette.text.computeLuminance() < 0.5;
     return GlassDesign(

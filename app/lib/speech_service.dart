@@ -51,10 +51,13 @@ class SpeechService {
     return Directory('$ttsDir/espeak-ng-data').exists();
   }
 
-  Future<void> startRecording(String outputPath) async {
+  Future<void> startRecording(
+    String outputPath, {
+    bool interruptPlayback = true,
+  }) async {
     if (!await recorder.hasPermission())
       throw StateError('Microphone permission denied.');
-    if (speaking) await stopSpeaking();
+    if (speaking && interruptPlayback) await stopSpeaking();
     await recorder.start(
       const RecordConfig(
         encoder: AudioEncoder.wav,
@@ -209,6 +212,22 @@ class SpeechService {
       return;
     }
     await player.stop();
+    if (Platform.isIOS) {
+      // Keep the microphone route active while the reply plays so a caller
+      // can interrupt without restarting the audio session.
+      await player.setAudioContext(
+        AudioContext(
+          iOS: AudioContextIOS(
+            category: AVAudioSessionCategory.playAndRecord,
+            options: {
+              AVAudioSessionOptions.defaultToSpeaker,
+              AVAudioSessionOptions.allowBluetooth,
+              AVAudioSessionOptions.allowBluetoothA2DP,
+            },
+          ),
+        ),
+      );
+    }
     _playStopped = Completer<void>();
     speaking = true;
     try {

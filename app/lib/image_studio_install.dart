@@ -3,7 +3,6 @@ import 'dart:isolate';
 
 import 'package:archive/archive_io.dart';
 import 'package:crypto/crypto.dart';
-import 'package:flutter/services.dart';
 
 import 'image_studio_engine.dart';
 
@@ -59,12 +58,10 @@ class ImageStudioInstaller {
             'The image model is incomplete. Tap Install to retry.',
           );
         }
-        status('Checking the image model on this iPhone…');
-        final verified = await const MethodChannel('local_ai_chat/image_studio')
-            .invokeMethod<bool>('verifyModel', {'modelDirectory': resources});
-        if (verified != true) {
-          throw StateError('The image model could not load on this iPhone.');
-        }
+        // The archive is pinned by size and SHA-256, and every required Core ML
+        // resource is checked above. Loading the full diffusion pipeline here
+        // can take minutes or exhaust memory before the user has even edited.
+        status('Image model files ready. The first edit will load the model.');
         await _removeRetiredIphoneModel();
       } else {
         throw UnsupportedError('Image Studio is available on iPhone.');

@@ -9,11 +9,16 @@ import Vision
 
 /// Runs local image generation and person-preserving compositing on the phone.
 final class ImageStudioBridge {
+  private let editStageKey = "FluxLiraImageStudioLastStage"
   private let lock = NSLock()
   private var busy = false
   private var cancelled = false
 
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    if call.method == "lastEditStage" {
+      result(UserDefaults.standard.string(forKey: editStageKey))
+      return
+    }
     if call.method == "cancelEdit" {
       lock.lock()
       cancelled = true
@@ -67,7 +72,6 @@ final class ImageStudioBridge {
           let output = args["output"] as? String,
           let resources = args["modelDirectory"] as? String,
           let prompt = args["prompt"] as? String,
-          let backgroundOnly = args["backgroundOnly"] as? Bool,
           let strength = args["strength"] as? Double,
           let steps = args["steps"] as? Int,
           let seed = args["seed"] as? Int,
@@ -88,9 +92,10 @@ final class ImageStudioBridge {
     }
     DispatchQueue.global(qos: .userInitiated).async { [self] in
       do {
+        UserDefaults.standard.set("preparing photo", forKey: editStageKey)
         let photo = try loadSquareImage(at: input)
-        let subjectMask = backgroundOnly ? try makeSubjectMask(for: photo) : nil
         guard !isCancelled() else { throw ImageStudioError.cancelledOrEmpty }
+        UserDefaults.standard.set("loading image model", forKey: editStageKey)
         let mlConfig = MLModelConfiguration()
         mlConfig.computeUnits = .cpuAndNeuralEngine
         let pipeline = try StableDiffusionPipeline(
@@ -101,18 +106,17 @@ final class ImageStudioBridge {
           reduceMemory: true
         )
         defer { pipeline.unloadResources() }
-        try pipeline.loadResources()
+        // With reduceMemory enabled, generation loads each component only
+        // when it is needed. Prewarming every model here can create a large
+        // memory spike before the first diffusion step on an iPhone.
         var options = StableDiffusionPipeline.Configuration(prompt: prompt)
-        if backgroundOnly {
-          options.negativePrompt = "person, people, human, portrait, face, body, table, furniture, indoor room, walls"
-        } else {
-          options.startingImage = photo
-          options.strength = Float(min(max(strength, 0.05), 0.95))
-        }
+        options.startingImage = photo
+        options.strength = Float(min(max(strength, 0.05), 0.95))
         options.stepCount = min(max(steps, 8), 40)
         options.seed = UInt32(clamping: seed)
         options.guidanceScale = 7.0
         options.disableSafety = true
+        UserDefaults.standard.set("generating image", forKey: editStageKey)
         let images = try pipeline.generateImages(
           configuration: options,
           progressHandler: { _ in !self.isCancelled() }
@@ -121,23 +125,17 @@ final class ImageStudioBridge {
           throw ImageStudioError.cancelledOrEmpty
         }
         guard !isCancelled() else { throw ImageStudioError.cancelledOrEmpty }
-        let edited: CGImage
-        if let subjectMask {
-          edited = try composite(
-            original: photo,
-            background: image,
-            subjectMask: subjectMask
-          )
-        } else {
-          edited = image
-        }
+        let edited = image
         guard !isCancelled() else { throw ImageStudioError.cancelledOrEmpty }
         guard let png = UIImage(cgImage: edited).pngData() else {
           throw ImageStudioError.cannotEncode
         }
+        UserDefaults.standard.set("saving image", forKey: editStageKey)
         try png.write(to: URL(fileURLWithPath: output), options: .atomic)
+        UserDefaults.standard.removeObject(forKey: editStageKey)
         finish(result, value: output)
       } catch {
+        UserDefaults.standard.removeObject(forKey: editStageKey)
         finish(result, error: FlutterError(
           code: isCancelled() ? "edit_cancelled" : "edit_failed",
           message: isCancelled() ? "Image edit stopped." : error.localizedDescription,
