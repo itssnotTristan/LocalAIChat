@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 import 'package:record/record.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 
+import 'speech_text.dart';
+
 class SpeechService {
   SpeechService(this.root);
   final String root;
@@ -143,9 +145,13 @@ class SpeechService {
     int voiceId = 5,
   }) async {
     final rootPath = root;
+    final spoken = SpeechText.prepare(text);
+    if (spoken.isEmpty) {
+      throw StateError('This reply has no words to speak.');
+    }
     try {
       return await Isolate.run(
-        () => _synthesize(rootPath, text, outputPath, voiceId),
+        () => _synthesize(rootPath, spoken, outputPath, voiceId),
       );
     } catch (_) {
       // Kokoro may fail to allocate after a large iPhone chat model. Keep
@@ -153,7 +159,7 @@ class SpeechService {
       if (!Platform.isIOS) rethrow;
       return Uri(
         scheme: 'system-speech',
-        queryParameters: {'text': text, 'voice': '$voiceId'},
+        queryParameters: {'text': spoken, 'voice': '$voiceId'},
       ).toString();
     }
   }
@@ -197,7 +203,7 @@ class SpeechService {
     }
   }
 
-  Future<void> playFile(String path) async {
+  Future<void> playFile(String path, {double playbackRate = 1.0}) async {
     if (isSystemSpeechPath(path)) {
       final parameters = Uri.parse(path).queryParameters;
       speaking = true;
@@ -205,6 +211,7 @@ class SpeechService {
         await _systemSpeech.invokeMethod<void>('speak', {
           'text': parameters['text'] ?? '',
           'voice': int.tryParse(parameters['voice'] ?? '') ?? 5,
+          'rate': playbackRate,
         });
       } finally {
         speaking = false;
@@ -231,8 +238,10 @@ class SpeechService {
     _playStopped = Completer<void>();
     speaking = true;
     try {
+      final completed = player.onPlayerComplete.first;
       await player.play(DeviceFileSource(path));
-      await Future.any([player.onPlayerComplete.first, _playStopped!.future]);
+      await player.setPlaybackRate(playbackRate.clamp(0.5, 2.0));
+      await Future.any([completed, _playStopped!.future]);
     } finally {
       speaking = false;
       _playStopped = null;

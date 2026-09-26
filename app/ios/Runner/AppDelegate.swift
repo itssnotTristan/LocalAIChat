@@ -365,7 +365,8 @@ final class SystemSpeechBridge: NSObject, AVSpeechSynthesizerDelegate {
       utterance.voice = preferred.isEmpty
         ? (english.first ?? AVSpeechSynthesisVoice(language: "en-US"))
         : preferred[index % preferred.count]
-      utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+      let requestedRate = (arguments["rate"] as? NSNumber)?.doubleValue ?? 1.0
+      utterance.rate = Float(min(max(requestedRate, 0.8), 1.4)) * AVSpeechUtteranceDefaultSpeechRate
       activeUtterance = utterance
       synthesizer.speak(utterance)
     case "stop":

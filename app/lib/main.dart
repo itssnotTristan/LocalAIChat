@@ -19,6 +19,7 @@ import 'chat_context.dart';
 import 'local_date.dart';
 import 'fish_voice.dart';
 import 'speech_service.dart';
+import 'speech_text.dart';
 import 'self_test.dart';
 import 'gguf_info.dart';
 import 'media_viewer.dart';
@@ -255,6 +256,42 @@ List<ChatEntry> textHistorySinceMedia(List<ChatEntry> history) {
   return kept.length > 8 ? kept.sublist(kept.length - 8) : kept;
 }
 
+/// Several local model templates reject consecutive messages with the same
+/// role. Saved conversations can contain those after a stopped or failed turn.
+List<LlamaResponseInputItem> alternatingTurns(
+  List<LlamaResponseInputItem> items,
+) {
+  final result = <LlamaResponseInputItem>[];
+  for (final item in items) {
+    if (item.role != 'user' && item.role != 'assistant') continue;
+    if (result.isEmpty && item.role == 'assistant') continue;
+    if (result.isNotEmpty && result.last.role == item.role) {
+      final previous = result.removeLast();
+      result.add(
+        LlamaResponseInputItem(
+          role: item.role,
+          content: [
+            ...(previous.content as List<LlamaContentPart>),
+            LlamaTextPart('\n'),
+            ...(item.content as List<LlamaContentPart>),
+          ],
+        ),
+      );
+    } else {
+      result.add(item);
+    }
+  }
+  return result;
+}
+
+bool isSilentReply(String text) {
+  final value = text.trim();
+  return value == '[Stopped]' ||
+      value == '[No response]' ||
+      value == '[Generation failed]' ||
+      value.startsWith('[The model repeated itself.');
+}
+
 bool isMediaFollowup(String text) {
   if (RegExp(
     r'^(?:no|actually|correction)\b',
@@ -352,6 +389,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool voiceRecording = false;
   bool voiceWorking = false;
   bool autoSpeak = true;
+  double voicePlaybackRate = 1.08;
   int selectedVoice = 5;
   String voiceSource = 'Offline';
   String fishVoiceId = '';
@@ -1095,6 +1133,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         motionSpeed = (data['motionSpeed'] as num?)?.toDouble() ?? 1.0;
         speechRoot = data['speechRoot'] as String?;
         autoSpeak = data['autoSpeak'] as bool? ?? true;
+        voicePlaybackRate = (data['voicePlaybackRate'] as num? ?? 1.08)
+            .toDouble()
+            .clamp(0.9, 1.35);
         selectedVoice = data['selectedVoice'] as int? ?? 5;
         if (!SpeechService.voices.any((item) => item.id == selectedVoice))
           selectedVoice = 5;
@@ -1324,6 +1365,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         'motionSpeed': motionSpeed,
         'speechRoot': speechRoot,
         'autoSpeak': autoSpeak,
+        'voicePlaybackRate': voicePlaybackRate,
         'selectedVoice': selectedVoice,
         'voiceSource': voiceSource,
         'fishVoiceId': fishVoiceId,
@@ -2244,6 +2286,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         parts.add(LlamaImageFilePart(path: inferencePath));
       }
       input.add(LlamaResponseInputItem(role: 'user', content: parts));
+      final requestInput = alternatingTurns(input);
       var rawReply = '';
       var stoppedForLoop = false;
       final failedVisionModels = <String>{};
@@ -2281,7 +2324,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         try {
           await for (final event in client.responses.stream(
             model: 'active',
-            input: input,
+            input: requestInput,
             instructions:
                 ChatContext.instructions(
                   global: instructions,
@@ -2438,7 +2481,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             )
             .firstOrNull;
         final retryModel = everyday ?? general ?? detailed ?? model;
-        final retryInput = List<LlamaResponseInputItem>.of(input);
+        final retryInput = List<LlamaResponseInputItem>.of(requestInput);
         if (repeatedEarlier && recent.contains(previousAssistant)) {
           final lastAssistantIndex = retryInput.lastIndexWhere(
             (item) => item.role == 'assistant',
@@ -2467,7 +2510,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         var retryRaw = '';
         await for (final event in retryClient.responses.stream(
           model: 'retry',
-          input: retryInput,
+          input: alternatingTurns(retryInput),
           instructions:
               '${ChatContext.instructions(global: instructions, personality: !userProfile.isAdult && chat.personality == 'Horny' ? 'Default' : chat.personality, customPersonality: chat.customPersonality, memory: chat.memory)}\n${userProfile.modelInstructions}\nThe current local date and time on this device are ${DateTime.now().toIso8601String()}.$libraryContext\nThe previous answer failed to address the latest message. Start fresh from the user’s latest words. Do not reuse earlier assistant wording, guess motives, echo the user, or describe old media as if you can see it now. If the user only states a new observation, acknowledge it briefly without inventing an explanation.${retryModel.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''}',
           maxOutputTokens: inferenceProfile
@@ -2557,13 +2600,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         !speakOnComplete ||
         !autoSpeak ||
         reply.isEmpty ||
-        reply.startsWith('['))
+        isSilentReply(reply))
       return;
     final epoch = voiceEpoch;
     try {
       final service = speech;
       if (service == null) throw StateError('Set up speech in Voice settings.');
       if (mounted) setState(() => status = 'Preparing voice reply…');
+      if (voiceSource == 'Fish Audio') {
+        await playFishReply(
+          reply,
+          shouldContinue: () => !cancelled && epoch == voiceEpoch,
+          onFirstReady: () async {
+            if (mounted) setState(() => status = 'Speaking with Fish Audio…');
+          },
+        );
+        if (mounted && !cancelled && epoch == voiceEpoch) {
+          setState(() => status = 'Ready');
+        }
+        return;
+      }
       final audioPath = await synthesizeReply(reply);
       if (cancelled || epoch != voiceEpoch) {
         if (!SpeechService.isSystemSpeechPath(audioPath)) {
@@ -2578,7 +2634,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 : 'Speaking…',
           );
         }
-        await service.playFile(audioPath);
+        await service.playFile(audioPath, playbackRate: voicePlaybackRate);
         if (mounted && !cancelled) setState(() => status = 'Ready');
       }
     } catch (error) {
@@ -2617,12 +2673,30 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         await send(speakOnComplete: false);
         if (epoch != voiceEpoch || !autoSpeak) return;
         final reply = chat.entries.isEmpty ? '' : chat.entries.last.text;
-        if (reply.isEmpty || reply.startsWith('[')) return;
+        if (reply.isEmpty || isSilentReply(reply)) return;
+        if (voiceSource == 'Fish Audio') {
+          setState(() => status = 'Preparing Fish Audio voice…');
+          await playFishReply(
+            reply,
+            shouldContinue: () => epoch == voiceEpoch,
+            onFirstReady: () async {
+              if (mounted) {
+                setState(
+                  () => status = 'Speaking. Tap the microphone to interrupt.',
+                );
+              }
+            },
+          );
+          if (mounted && epoch == voiceEpoch) {
+            setState(() => status = 'Ready');
+          }
+          return;
+        }
         setState(() => status = 'Preparing local speech…');
         final wav = await synthesizeReply(reply);
         if (epoch != voiceEpoch) return;
         setState(() => status = 'Speaking. Tap the microphone to interrupt.');
-        await service.playFile(wav);
+        await service.playFile(wav, playbackRate: voicePlaybackRate);
         if (mounted && epoch == voiceEpoch) setState(() => status = 'Ready');
       } catch (error) {
         if (mounted)
@@ -2675,6 +2749,90 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
     }
     return speech!.synthesize(reply, output, voiceId: selectedVoice);
+  }
+
+  Future<void> playFishReply(
+    String reply, {
+    required bool Function() shouldContinue,
+    Future<void> Function()? onFirstReady,
+  }) async {
+    final service = speech;
+    if (service == null || dataDir == null) {
+      throw StateError('Set up speech in Voice settings.');
+    }
+    final parts = FishVoice.playbackChunks(reply);
+    if (parts.isEmpty) return;
+    final voiceId = fishVoiceId;
+    final personality = chat.personality;
+    final rate = voicePlaybackRate;
+    final directionHint = SpeechText.direction(reply);
+
+    Future<String> prepare(int index) {
+      final output =
+          '${dataDir!.path}${Platform.pathSeparator}fish_${DateTime.now().microsecondsSinceEpoch}_$index.mp3';
+      return FishVoice.synthesize(
+        FishVoice.performanceText(
+          parts[index],
+          personality,
+          directionHint: index == 0 ? directionHint : null,
+        ),
+        voiceId,
+        output,
+      );
+    }
+
+    void discardWhenReady(Future<String>? pending) {
+      if (pending == null) return;
+      unawaited(
+        pending
+            .then((path) async {
+              final file = File(path);
+              if (await file.exists()) await file.delete();
+            })
+            .catchError((Object _) {}),
+      );
+    }
+
+    Future<String> prepareFollowing(int index) {
+      final future = prepare(index);
+      // Playback may outlast synthesis. Handle a prefetch error immediately,
+      // then surface it when the next chunk is actually awaited.
+      unawaited(
+        future.then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+      );
+      return future;
+    }
+
+    Future<String>? pending = prepare(0);
+    for (var index = 0; index < parts.length; index++) {
+      final path = await pending!;
+      if (!shouldContinue()) {
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+        return;
+      }
+      Future<String>? following;
+      try {
+        if (index == 0) await onFirstReady?.call();
+        if (!shouldContinue()) {
+          final file = File(path);
+          if (await file.exists()) await file.delete();
+          return;
+        }
+        if (index + 1 < parts.length) following = prepareFollowing(index + 1);
+        await service.playFile(path, playbackRate: rate);
+      } catch (_) {
+        discardWhenReady(following);
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+        rethrow;
+      }
+      if (!shouldContinue()) {
+        discardWhenReady(following);
+        return;
+      }
+      pending = following;
+    }
   }
 
   Future<void> endVoiceCall() async {
@@ -2754,36 +2912,50 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         final answer = chat.entries.last;
         if (answer.role != 'assistant' ||
             answer.text.isEmpty ||
-            answer.text.startsWith('['))
+            isSilentReply(answer.text))
           continue;
         callStatus.value = voiceSource == 'Fish Audio'
             ? 'Preparing Fish Audio voice…'
             : 'Preparing ${SpeechService.voices.firstWhere((item) => item.id == selectedVoice).name}…';
-        final wav = await synthesizeReply(answer.text);
+        final fishReply = voiceSource == 'Fish Audio';
+        final wav = fishReply ? null : await synthesizeReply(answer.text);
         if (!callActive || epoch != callEpoch) {
-          if (!SpeechService.isSystemSpeechPath(wav)) {
+          if (wav != null && !SpeechService.isSystemSpeechPath(wav)) {
             final file = File(wav);
             if (await file.exists()) await file.delete();
           }
           continue;
         }
-        callStatus.value = 'Speaking · talk or tap Interrupt';
         callInterruptNow = false;
         final bargePath =
             '${recordings.path}${Platform.pathSeparator}barge_${DateTime.now().microsecondsSinceEpoch}.wav';
         var canListen = false;
-        try {
-          await service.startRecording(bargePath, interruptPlayback: false);
-          canListen = true;
-        } catch (_) {
-          // Playback must still work on devices that disallow simultaneous
-          // recording. The visible Interrupt control remains available.
+        DateTime? bargeStarted;
+        Future<void> beginPlayback() async {
+          callStatus.value = 'Speaking · talk or tap Interrupt';
+          try {
+            await service.startRecording(bargePath, interruptPlayback: false);
+            canListen = true;
+            bargeStarted = DateTime.now();
+          } catch (_) {
+            // The visible Interrupt control remains available when a device
+            // cannot record and play simultaneously.
+          }
         }
+
+        if (!fishReply) await beginPlayback();
         var playbackFinished = false;
-        final playback = service
-            .playFile(wav)
-            .whenComplete(() => playbackFinished = true);
-        final bargeStarted = DateTime.now();
+        var replyCancelled = false;
+        final playback =
+            (fishReply
+                    ? playFishReply(
+                        answer.text,
+                        shouldContinue: () =>
+                            !replyCancelled && callActive && epoch == callEpoch,
+                        onFirstReady: beginPlayback,
+                      )
+                    : service.playFile(wav!, playbackRate: voicePlaybackRate))
+                .whenComplete(() => playbackFinished = true);
         final bargeDetector = VoiceBargeInDetector();
         var interrupted = false;
         while (callActive && epoch == callEpoch && !playbackFinished) {
@@ -2792,18 +2964,27 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             interrupted = true;
             break;
           }
-          if (!canListen || callMuted) continue;
+          if (!canListen || callMuted || bargeStarted == null) continue;
           final level = await service.microphoneLevel();
           if (bargeDetector.add(
             level,
-            DateTime.now().difference(bargeStarted).inMilliseconds,
+            DateTime.now().difference(bargeStarted!).inMilliseconds,
           )) {
             interrupted = true;
             break;
           }
         }
-        if (interrupted) await service.stopSpeaking();
-        await playback;
+        if (interrupted) {
+          replyCancelled = true;
+          await service.stopSpeaking();
+        }
+        if (interrupted && fishReply) {
+          // A Fish request may still be finishing on the network. Its result
+          // is discarded by playFishReply while the call listens again now.
+          unawaited(playback.catchError((Object _) {}));
+        } else {
+          await playback;
+        }
         callInterruptNow = false;
         if (canListen && service.recording) {
           if (interrupted && callActive && epoch == callEpoch && !callMuted) {
@@ -3337,11 +3518,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     var animated = motion;
     var speed = motionSpeed;
     var spokenReplies = autoSpeak;
+    var playbackRate = voicePlaybackRate;
     var voice = selectedVoice;
     var source = voiceSource;
     final fishIdController = TextEditingController(text: fishVoiceId);
     final fishKeyController = TextEditingController();
-    var keySaved = fishHasKey;
+    var keySaved = false;
+    String? fishKeyStatus;
+    try {
+      keySaved = await FishVoice.hasKey;
+      fishHasKey = keySaved;
+    } catch (error) {
+      fishKeyStatus = 'Could not read the saved Fish Audio key: $error';
+    }
+    if (!mounted) return;
     var fishTestStatus = '';
     await showDialog<void>(
       context: context,
@@ -4007,7 +4197,64 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             labelText: keySaved
                                 ? 'Replace saved API key'
                                 : 'Fish Audio API key',
+                            helperText: keySaved
+                                ? 'A key is saved securely. Leave this blank to keep it.'
+                                : 'Paste your key, then tap Save Fish voice.',
                           ),
+                        ),
+                        if (fishKeyStatus != null) Text(fishKeyStatus!),
+                        TextButton.icon(
+                          icon: const Icon(Icons.key_outlined),
+                          label: const Text('Save Fish voice'),
+                          onPressed: () async {
+                            final newKey = fishKeyController.text.trim();
+                            final newVoiceId = FishVoice.voiceIdFromInput(
+                              fishIdController.text,
+                            );
+                            if (newKey.isEmpty && !keySaved) {
+                              update(
+                                () => fishKeyStatus =
+                                    'Paste a Fish Audio API key first.',
+                              );
+                              return;
+                            }
+                            if (newVoiceId.isEmpty) {
+                              update(
+                                () => fishKeyStatus =
+                                    'Paste a Fish voice link or ID first.',
+                              );
+                              return;
+                            }
+                            try {
+                              if (newKey.isNotEmpty) {
+                                await FishVoice.saveKey(newKey);
+                              }
+                              final retained = await FishVoice.hasKey;
+                              if (!retained) {
+                                throw StateError(
+                                  'The key was not retained by iPhone secure storage.',
+                                );
+                              }
+                              fishHasKey = true;
+                              fishVoiceId = newVoiceId;
+                              voiceSource = 'Fish Audio';
+                              voicePlaybackRate = playbackRate;
+                              await save();
+                              if (!context.mounted) return;
+                              update(() {
+                                keySaved = true;
+                                fishKeyController.clear();
+                                fishKeyStatus =
+                                    'Fish key and voice saved on this iPhone.';
+                              });
+                            } catch (error) {
+                              if (!context.mounted) return;
+                              update(
+                                () => fishKeyStatus =
+                                    'Could not save Fish voice: $error',
+                              );
+                            }
+                          },
                         ),
                         TextButton.icon(
                           icon: const Icon(Icons.play_arrow),
@@ -4018,9 +4265,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               () => fishTestStatus = 'Preparing voice sample…',
                             );
                             try {
-                              if (fishKeyController.text.trim().isNotEmpty) {
-                                await FishVoice.saveKey(fishKeyController.text);
-                                update(() => keySaved = true);
+                              final enteredKey = fishKeyController.text.trim();
+                              final enteredVoiceId = FishVoice.voiceIdFromInput(
+                                fishIdController.text,
+                              );
+                              if (enteredKey.isNotEmpty) {
+                                await FishVoice.saveKey(enteredKey);
+                                if (!context.mounted) return;
+                                update(() {
+                                  keySaved = true;
+                                  fishHasKey = true;
+                                  fishKeyController.clear();
+                                  fishKeyStatus =
+                                      'Fish Audio key saved securely.';
+                                });
                               }
                               final path =
                                   '${dataDir!.path}${Platform.pathSeparator}fish_voice_test.mp3';
@@ -4029,18 +4287,33 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   'This is how I sound in this conversation.',
                                   chat.personality,
                                 ),
-                                fishIdController.text,
+                                enteredVoiceId,
                                 path,
                               );
+                              if (!context.mounted) {
+                                final file = File(path);
+                                if (await file.exists()) await file.delete();
+                                return;
+                              }
                               update(
                                 () => fishTestStatus = 'Playing voice sample…',
                               );
-                              await speech!.playFile(path);
+                              await speech!.playFile(
+                                path,
+                                playbackRate: playbackRate,
+                              );
+                              fishHasKey = await FishVoice.hasKey;
+                              fishVoiceId = enteredVoiceId;
+                              voiceSource = 'Fish Audio';
+                              voicePlaybackRate = playbackRate;
+                              await save();
+                              if (!context.mounted) return;
                               update(
                                 () => fishTestStatus =
                                     'Voice played successfully.',
                               );
                             } catch (error) {
+                              if (!context.mounted) return;
                               update(
                                 () => fishTestStatus =
                                     'Voice test failed: $error',
@@ -4052,9 +4325,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         if (keySaved)
                           TextButton(
                             onPressed: () async {
-                              await FishVoice.saveKey('');
-                              update(() => keySaved = false);
-                              fishHasKey = false;
+                              try {
+                                await FishVoice.saveKey('');
+                                final retained = await FishVoice.hasKey;
+                                if (!context.mounted) return;
+                                update(() {
+                                  keySaved = retained;
+                                  fishHasKey = retained;
+                                  fishKeyStatus = retained
+                                      ? 'Could not remove the saved Fish Audio key.'
+                                      : 'Saved Fish Audio key removed.';
+                                });
+                              } catch (error) {
+                                if (!context.mounted) return;
+                                update(
+                                  () => fishKeyStatus =
+                                      'Could not remove Fish Audio key: $error',
+                                );
+                              }
                             },
                             child: const Text('Remove saved key'),
                           ),
@@ -4064,6 +4352,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         value: spokenReplies,
                         onChanged: (value) =>
                             update(() => spokenReplies = value),
+                      ),
+                      Text(
+                        'Voice playback · ${playbackRate.toStringAsFixed(2)}×',
+                      ),
+                      Slider(
+                        value: playbackRate,
+                        min: 0.9,
+                        max: 1.35,
+                        divisions: 9,
+                        onChanged: (value) =>
+                            update(() => playbackRate = value),
                       ),
                     ],
                   ),
@@ -4084,7 +4383,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       if (fishKeyController.text.trim().isNotEmpty) {
                         try {
                           await FishVoice.saveKey(fishKeyController.text);
-                          fishHasKey = true;
+                          fishHasKey = await FishVoice.hasKey;
                         } catch (error) {
                           if (mounted)
                             showProblem(
@@ -4130,6 +4429,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         motionSpeed = speed;
                         speechRoot = speechController.text.trim();
                         autoSpeak = spokenReplies;
+                        voicePlaybackRate = playbackRate;
                         selectedVoice = voice;
                         voiceSource = source;
                         fishVoiceId = FishVoice.voiceIdFromInput(
