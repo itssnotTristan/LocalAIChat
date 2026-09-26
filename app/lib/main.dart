@@ -104,6 +104,51 @@ Future<void> main(List<String> args) async {
         exit(2);
       }
     }
+    final transferMarker = File(
+      '${support.path}/run-background-transfer-self-test',
+    );
+    if (await transferMarker.exists()) {
+      await transferMarker.delete();
+      final report = File('${support.path}/background-transfer-test.json');
+      final downloaded = File('${support.path}/background-bridge-smoke.part');
+      const channel = MethodChannel('local_ai_chat/model_transfers');
+      const id = 'background-bridge-smoke';
+      try {
+        await channel.invokeMethod<void>('start', {
+          'id': id,
+          'url': 'https://raw.githubusercontent.com/flutter/flutter/3.47.5/LICENSE',
+          'destination': downloaded.path,
+          'expected': 0,
+        });
+        var state = '';
+        for (var attempt = 0; attempt < 80; attempt++) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          final entries = await channel.invokeListMethod<dynamic>('list') ?? [];
+          final item = entries
+              .whereType<Map>()
+              .where((row) => row['id'] == id)
+              .firstOrNull;
+          state = item?['state'] as String? ?? 'missing';
+          if (state == 'downloaded' || state == 'failed') break;
+        }
+        final bytes = await downloaded.exists() ? await downloaded.length() : 0;
+        await report.writeAsString(
+          jsonEncode({
+            'ok': state == 'downloaded' && bytes > 1000,
+            'state': state,
+            'bytes': bytes,
+          }),
+        );
+        await channel.invokeMethod<void>('forget', {'id': id});
+        if (state != 'downloaded' || bytes <= 1000) exit(2);
+        exit(0);
+      } catch (error) {
+        await report.writeAsString(
+          jsonEncode({'ok': false, 'error': '$error'}),
+        );
+        exit(2);
+      }
+    }
   }
   runApp(const LocalChatApp());
 }

@@ -96,6 +96,14 @@ jobs:
           done
           cat "$container/Library/Application Support/system-speech-test.json"
           grep -q '"ok":true' "$container/Library/Application Support/system-speech-test.json"
+          touch "$container/Library/Application Support/run-background-transfer-self-test"
+          xcrun simctl launch "$simulator" com.localai.localAiChat
+          for attempt in $(seq 1 55); do
+            if [ -f "$container/Library/Application Support/background-transfer-test.json" ]; then break; fi
+            sleep 1
+          done
+          cat "$container/Library/Application Support/background-transfer-test.json"
+          grep -q '"ok":true' "$container/Library/Application Support/background-transfer-test.json"
           xcrun simctl launch "$simulator" com.localai.localAiChat
           sleep 5
           xcrun simctl io "$simulator" screenshot iphone-preview.png
