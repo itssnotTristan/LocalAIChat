@@ -39,6 +39,19 @@ class ModelDownloader {
   static const roleplayName = 'Qwen3-4B-Nymphaea-RP.Q4_K_M.gguf';
   static const roleplaySha256 =
       '7896e1c1e498554887ea6439c44939216f67146fa3c3298ee7a95c2cf206376d';
+  static const roleplayBytes = 2497281216;
+  static const adultVisionUrl =
+      'https://huggingface.co/prithivMLmods/Qwen3-VL-4B-Instruct-abliterated-v1-GGUF/resolve/main/';
+  static const adultVisionName =
+      'Qwen3-VL-4B-Instruct-abliterated-v1.Q4_K_M.gguf';
+  static const adultProjectorName =
+      'Qwen3-VL-4B-Instruct-abliterated-v1.mmproj-Q8_0.gguf';
+  static const adultVisionSha256 =
+      '7501e3dfccbc4213fbf52a4311ed31d053af8396ccf665c3fa261dc62bd125f3';
+  static const adultProjectorSha256 =
+      '33d19545c921a784354b7cc099fa1f0e5b48352b73ab82bf077600e5ff9c6834';
+  static const adultVisionBytes = 2497282624;
+  static const adultProjectorBytes = 453974752;
 
   void cancel() {
     _cancelled = true;
@@ -140,7 +153,40 @@ class ModelDownloader {
         roleplaySha256,
         onProgress,
         baseUrl: roleplayUrl,
+        expectedBytes: roleplayBytes,
       );
+    } finally {
+      _client?.close();
+      _client = null;
+    }
+  }
+
+  Future<StarterModelFiles> downloadAdultVision(
+    String directory,
+    void Function(String name, int received, int? total) onProgress,
+  ) async {
+    _cancelled = false;
+    _client = HttpClient();
+    final folder = Directory(directory);
+    await folder.create(recursive: true);
+    try {
+      final model = await _downloadOne(
+        folder,
+        adultVisionName,
+        adultVisionSha256,
+        onProgress,
+        baseUrl: adultVisionUrl,
+        expectedBytes: adultVisionBytes,
+      );
+      final projector = await _downloadOne(
+        folder,
+        adultProjectorName,
+        adultProjectorSha256,
+        onProgress,
+        baseUrl: adultVisionUrl,
+        expectedBytes: adultProjectorBytes,
+      );
+      return StarterModelFiles(model, projector);
     } finally {
       _client?.close();
       _client = null;
@@ -153,6 +199,7 @@ class ModelDownloader {
     String expectedSha,
     void Function(String, int, int?) onProgress, {
     String baseUrl = base,
+    int? expectedBytes,
   }) async {
     final file = File(folder.path + Platform.pathSeparator + name);
     if (await file.exists()) {
@@ -166,6 +213,15 @@ class ModelDownloader {
     }
     final partial = File(file.path + '.part');
     var offset = await partial.exists() ? await partial.length() : 0;
+    if (expectedBytes != null && offset == expectedBytes) {
+      await _verify(partial, name, expectedSha, onProgress);
+      await partial.rename(file.path);
+      return file.path;
+    }
+    if (expectedBytes != null && offset > expectedBytes) {
+      await partial.delete();
+      offset = 0;
+    }
     final request = await _client!.getUrl(Uri.parse(baseUrl + name));
     if (offset > 0)
       request.headers.set(HttpHeaders.rangeHeader, 'bytes=$offset-');
@@ -200,13 +256,34 @@ class ModelDownloader {
     if (total != null && received != total) {
       throw StateError('Download ended early. Tap again to resume.');
     }
-    final actualSha = await _digest(partial);
-    if (actualSha != expectedSha) {
-      await partial.delete();
-      throw StateError('$name failed SHA-256 verification.');
-    }
+    await _verify(partial, name, expectedSha, onProgress);
     await partial.rename(file.path);
     return file.path;
+  }
+
+  Future<void> _verify(
+    File file,
+    String name,
+    String expectedSha,
+    void Function(String, int, int?) onProgress,
+  ) async {
+    final length = await file.length();
+    var read = 0;
+    var lastReport = 0;
+    final chunks = file.openRead().map((chunk) {
+      if (_cancelled) throw const HttpException('Download cancelled.');
+      read += chunk.length;
+      if (read - lastReport >= 16 * 1048576 || read == length) {
+        lastReport = read;
+        onProgress('Verifying $name', read, length);
+      }
+      return chunk;
+    });
+    final actualSha = (await sha256.bind(chunks).first).toString();
+    if (actualSha != expectedSha) {
+      await file.delete();
+      throw StateError('$name failed SHA-256 verification. Download it again.');
+    }
   }
 
   Future<String> _digest(File file) async {

@@ -2,6 +2,30 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:local_ai_chat/reply_quality.dart';
 
 void main() {
+  test('catches exact echo and unsupported visual claim', () {
+    expect(
+      isEchoedReply(
+        'Do you want to see my penis?',
+        'do you want to see my penis',
+      ),
+      isTrue,
+    );
+    expect(
+      isEchoedReply('Yes, you can share it.', 'Do you want to see it?'),
+      isFalse,
+    );
+    expect(
+      isDetachedMediaReply(
+        'A visible object in the image/frame.',
+        'Do you want to see it?',
+      ),
+      isTrue,
+    );
+    expect(
+      isDetachedMediaReply('The image shows a dog.', 'What is in the image?'),
+      isFalse,
+    );
+  });
   test('hides complete and streaming thinking blocks', () {
     expect(
       visibleReply('<think>private notes</think>Hello there.'),

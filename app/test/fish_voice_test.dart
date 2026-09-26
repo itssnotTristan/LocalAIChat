@@ -16,4 +16,16 @@ void main() {
       'abc123',
     );
   });
+
+  test('Fish speech direction follows the saved chat personality', () {
+    expect(
+      FishVoice.performanceText('Come closer.', 'Horny'),
+      '[whisper] Come closer.',
+    );
+    expect(
+      FishVoice.performanceText('Seriously?', 'Jerk'),
+      '[angry] Seriously?',
+    );
+    expect(FishVoice.performanceText('Hello!', 'Default'), 'Hello!');
+  });
 }

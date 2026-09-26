@@ -15,10 +15,23 @@ abstract interface class LlamaEngine {
   });
 }
 
+/// Lets the UI interrupt a model load or decode even before the next token is
+/// emitted. Each request should get its own controller.
+final class LlamaCancellationController {
+  final Completer<void> _cancelled = Completer<void>();
+  bool get isCancelled => _cancelled.isCompleted;
+  Future<void> get whenCancelled => _cancelled.future;
+  void cancel() {
+    if (!_cancelled.isCompleted) _cancelled.complete();
+  }
+}
+
 final class LibLlamaCpp implements LlamaEngine {
-  const LibLlamaCpp({LibLlamaCppPlatform? platform}) : _platform = platform;
+  const LibLlamaCpp({LibLlamaCppPlatform? platform, this.cancellation})
+    : _platform = platform;
 
   final LibLlamaCppPlatform? _platform;
+  final LlamaCancellationController? cancellation;
 
   @override
   Stream<LlamaResponse> transform(
@@ -50,12 +63,21 @@ final class LibLlamaCpp implements LlamaEngine {
       return;
     }
 
+    // The worker can be busy in native image processing or model loading.
+    // Closing only the Dart stream would leave that work running.
+    if (cancellation != null) {
+      unawaited(cancellation!.whenCancelled.then((_) => actor.abort()));
+      if (cancellation!.isCancelled) actor.abort();
+    }
+
     yield LlamaReadyResponse(library: library);
 
     try {
       await for (final command in commands) {
+        if (cancellation?.isCancelled ?? false) break;
         yield* actor.dispatch(command);
-        if (command is LlamaDisposeCommand) {
+        if ((cancellation?.isCancelled ?? false) ||
+            command is LlamaDisposeCommand) {
           break;
         }
       }

@@ -9,6 +9,20 @@ class FishVoice {
   static const _keyName = 'fish_audio_api_key';
   static final endpoint = Uri.parse('https://api.fish.audio/v1/tts');
 
+  /// Fish S2.1 supports inline direction tags. Keep them in the audio request
+  /// only, so they never appear in the visible chat reply or local TTS.
+  static String performanceText(String text, String personality) {
+    final cleaned = text.trim();
+    if (cleaned.isEmpty) return cleaned;
+    final direction = switch (personality) {
+      'Horny' => '[whisper] ',
+      'Jerk' => '[angry] ',
+      'Playful' => '[chuckle] ',
+      _ => '',
+    };
+    return '$direction$cleaned';
+  }
+
   static String voiceIdFromInput(String input) {
     final value = input.trim();
     final uri = Uri.tryParse(value);
@@ -61,6 +75,11 @@ class FishVoice {
         throw HttpException(
           'Fish Audio returned HTTP ${response.statusCode}. Check the key and voice ID.',
         );
+      }
+      final contentType = response.headers.contentType?.mimeType ?? '';
+      if (contentType.contains('json') || contentType.contains('text/')) {
+        final message = await utf8.decoder.bind(response).join();
+        throw StateError('Fish Audio did not return audio: $message');
       }
       final output = File(outputPath);
       final sink = output.openWrite();

@@ -9,6 +9,30 @@ String visibleReply(String raw) {
   return text.trimLeft();
 }
 
+/// Catch a weak model's answer that only copies the current user message.
+bool isEchoedReply(String answer, String question) {
+  String normalize(String value) => RegExp(
+    r"[\p{L}\p{N}']+",
+    unicode: true,
+  ).allMatches(value.toLowerCase()).map((match) => match.group(0)!).join(' ');
+  final reply = normalize(answer);
+  final asked = normalize(question);
+  return asked.isNotEmpty && reply == asked;
+}
+
+/// A text-only turn must not invent visual evidence from an older attachment.
+bool isDetachedMediaReply(String answer, String question) {
+  final visualTerms = RegExp(
+    r'\b(image|photo|picture|video|frame|clip|screenshot)\b',
+    caseSensitive: false,
+  );
+  if (visualTerms.hasMatch(question)) return false;
+  return RegExp(
+    r'\b(?:in|from|of) the (?:image|photo|picture|video|frame|clip|screenshot)\b',
+    caseSensitive: false,
+  ).hasMatch(answer);
+}
+
 bool isRepeatingReply(String text) {
   final words = RegExp(
     r"[\p{L}\p{N}']+",

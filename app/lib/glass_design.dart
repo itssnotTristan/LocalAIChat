@@ -200,6 +200,7 @@ class GlassDesign extends InheritedWidget {
     required this.themeName,
     required this.customColor,
     required this.starColor,
+    required this.starBackgroundColor,
     required this.auroraColor,
     required this.motion,
     required this.speed,
@@ -210,6 +211,7 @@ class GlassDesign extends InheritedWidget {
   final String themeName;
   final Color customColor;
   final Color starColor;
+  final Color starBackgroundColor;
   final Color auroraColor;
   final bool motion;
   final double speed;
@@ -221,6 +223,7 @@ class GlassDesign extends InheritedWidget {
       themeName != oldWidget.themeName ||
       customColor != oldWidget.customColor ||
       starColor != oldWidget.starColor ||
+      starBackgroundColor != oldWidget.starBackgroundColor ||
       auroraColor != oldWidget.auroraColor ||
       motion != oldWidget.motion ||
       speed != oldWidget.speed ||
@@ -276,6 +279,7 @@ class _GlassBackgroundState extends State<GlassBackground> {
           design.backgroundStyle,
           tick,
           design.starColor,
+          design.starBackgroundColor,
           design.auroraColor,
         ),
         child: const SizedBox.expand(),
@@ -291,6 +295,7 @@ class _AtmospherePainter extends CustomPainter {
     this.style,
     this.tick,
     this.starColor,
+    this.starBackgroundColor,
     this.auroraColor,
   );
   final GlassPalette palette;
@@ -298,6 +303,7 @@ class _AtmospherePainter extends CustomPainter {
   final String style;
   final double tick;
   final Color starColor;
+  final Color starBackgroundColor;
   final Color auroraColor;
   @override
   void paint(Canvas canvas, Size size) {
@@ -308,7 +314,13 @@ class _AtmospherePainter extends CustomPainter {
         ..shader = LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [palette.base, palette.base2, palette.base],
+          colors: style == 'Starfield'
+              ? [
+                  starBackgroundColor,
+                  Color.lerp(starBackgroundColor, Colors.black, 0.25)!,
+                  starBackgroundColor,
+                ]
+              : [palette.base, palette.base2, palette.base],
         ).createShader(bounds),
     );
     if (style == 'Quiet') return;
@@ -570,6 +582,7 @@ class _AtmospherePainter extends CustomPainter {
       old.palette != palette ||
       old.accent != accent ||
       old.starColor != starColor ||
+      old.starBackgroundColor != starBackgroundColor ||
       old.auroraColor != auroraColor ||
       old.style != style;
 }

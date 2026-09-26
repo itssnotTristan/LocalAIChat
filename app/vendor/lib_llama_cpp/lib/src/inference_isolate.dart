@@ -113,6 +113,19 @@ final class InferenceIsolate {
       _isolate.kill(priority: Isolate.immediate);
     }
   }
+
+  /// Stop native generation immediately, including while it is between Dart
+  /// tokens. The current model session is discarded after an interruption.
+  void abort() {
+    if (_isClosed) return;
+    _isClosed = true;
+    for (final controller in _pending.values) {
+      unawaited(controller.close());
+    }
+    _pending.clear();
+    _isolate.kill(priority: Isolate.immediate);
+    unawaited(_subscription.cancel());
+  }
 }
 
 final class _StartMessage {

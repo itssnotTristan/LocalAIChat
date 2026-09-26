@@ -4,7 +4,13 @@ import 'package:local_ai_chat/main.dart';
 void main() {
   test('conversation and timestamped media survive local JSON encoding', () {
     final conversation = Conversation('one', 'Video test', [
-      ChatEntry('user', 'Describe this clip', [MediaFrame('frame.jpg', 1500)]),
+      ChatEntry(
+        'user',
+        'Describe this clip',
+        [MediaFrame('frame.jpg', 1500)],
+        'original.mov',
+        'playback.mp4',
+      ),
       ChatEntry('assistant', 'A red car appears.'),
     ]);
     final restored = Conversation.fromJson(conversation.toJson());
@@ -17,6 +23,8 @@ void main() {
       1500,
     );
     expect(restored.entries.last.text, 'A red car appears.');
+    expect(restored.entries.first.videoPath, 'original.mov');
+    expect(restored.entries.first.playbackPath, 'playback.mp4');
   });
 
   test('text history drops an old video caption but keeps new chat', () {

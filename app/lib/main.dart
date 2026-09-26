@@ -10,11 +10,13 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'glass_design.dart';
+import 'color_picker.dart';
 import 'chat_context.dart';
 import 'fish_voice.dart';
 import 'speech_service.dart';
 import 'self_test.dart';
 import 'gguf_info.dart';
+import 'media_viewer.dart';
 import 'model_download.dart';
 import 'reply_quality.dart';
 import 'speech_download.dart';
@@ -33,6 +35,18 @@ Future<void> main(List<String> args) async {
   }
   if (args.isNotEmpty && args.first == '--probe-vision') {
     await runVisionProbe(args);
+    exit(0);
+  }
+  if (args.isNotEmpty && args.first == '--probe-video') {
+    await runVideoProbe(args);
+    exit(0);
+  }
+  if (args.isNotEmpty && args.first == '--probe-playback') {
+    await runPlaybackProbe(args);
+    exit(0);
+  }
+  if (args.isNotEmpty && args.first == '--probe-stop') {
+    await runStopProbe(args);
     exit(0);
   }
   if (args.isNotEmpty && args.first == '--self-test-voices') {
@@ -110,15 +124,24 @@ class MediaFrame {
 }
 
 class ChatEntry {
-  ChatEntry(this.role, this.text, [List<MediaFrame>? frames])
-    : frames = frames ?? [];
+  ChatEntry(
+    this.role,
+    this.text, [
+    List<MediaFrame>? frames,
+    this.videoPath,
+    this.playbackPath,
+  ]) : frames = frames ?? [];
   String role;
   String text;
   List<MediaFrame> frames;
+  String? videoPath;
+  String? playbackPath;
   Map<String, dynamic> toJson() => {
     'role': role,
     'text': text,
     'frames': frames.map((frame) => frame.toJson()).toList(),
+    'videoPath': videoPath,
+    'playbackPath': playbackPath,
   };
   factory ChatEntry.fromJson(Map<String, dynamic> data) => ChatEntry(
     data['role'] as String,
@@ -129,6 +152,8 @@ class ChatEntry {
               MediaFrame.fromJson(Map<String, dynamic>.from(frame as Map)),
         )
         .toList(),
+    data['videoPath'] as String?,
+    data['playbackPath'] as String?,
   );
 }
 
@@ -200,6 +225,8 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   static const autoModelPath = '__auto__';
+  static const defaultInstructions =
+      'You are a private local assistant. Answer the latest user message directly and naturally. Do not simply repeat the user’s words. Treat a user correction as newer information. Only claim to see images or video when media is attached to this message.';
   final draft = TextEditingController();
   final models = <LocalModel>[];
   final chats = <Conversation>[];
@@ -208,15 +235,16 @@ class _ChatScreenState extends State<ChatScreen> {
   String? modelPath;
   String? chatId;
   String status = 'Loading local data…';
-  String instructions =
-      'You are a private local assistant. Answer the latest user message directly. Describe only details visible in attached images or video frames, including adult nudity when visible. Do not invent unseen anatomy, actions, or a story. Treat a user correction as newer information and do not repeat an earlier mistaken answer.';
+  String instructions = defaultInstructions;
   bool busy = false;
   bool cancelled = false;
-  int frameCount = 8;
+  LlamaCancellationController? activeGeneration;
+  int frameCount = 4;
   int maxTokens = 400;
   String themeName = 'Aurora';
   Color customColor = const Color(0xFF55C8FF);
   Color starColor = const Color(0xFFB6DCFF);
+  Color starBackgroundColor = const Color(0xFF091326);
   Color auroraColor = const Color(0xFF58F6BA);
   String backgroundStyle = 'Waves';
   bool motion = true;
@@ -242,6 +270,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool downloadingSpeech = false;
   bool samplingVideo = false;
   String? currentVideoPath;
+  String? currentVideoPlaybackPath;
   int? currentVideoDurationMs;
   Future<void> _saveQueue = Future<void>.value();
 
@@ -250,6 +279,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (attachments.isNotEmpty) {
       for (final model in models) {
         if (model.path == modelPath && model.vision) return model;
+      }
+      for (final model in models) {
+        if (model.vision && model.name.contains('Qwen3 VL')) return model;
       }
       for (final model in models) {
         if (model.vision && model.name.contains('Qwen3.5')) return model;
@@ -261,12 +293,18 @@ class _ChatScreenState extends State<ChatScreen> {
     if (modelPath == autoModelPath) {
       if (attachments.isNotEmpty) {
         for (final model in models) {
+          if (model.vision && model.name.contains('Qwen3 VL')) return model;
+        }
+        for (final model in models) {
           if (model.vision && model.name.contains('Qwen3.5')) return model;
         }
         for (final model in models) {
           if (model.vision) return model;
         }
       } else {
+        for (final model in models) {
+          if (!model.vision && model.name.contains('Nymphaea')) return model;
+        }
         for (final model in models) {
           if (model.vision && model.name.contains('Qwen3.5')) return model;
         }
@@ -453,7 +491,7 @@ class _ChatScreenState extends State<ChatScreen> {
         lastShownMiB = currentMiB;
         setState(
           () => status =
-              'Downloading $name · $currentMiB MiB' +
+              '${name.startsWith('Verifying ') ? '' : 'Downloading '}$name · $currentMiB MiB' +
               (total == null ? '' : ' / ${total ~/ 1048576} MiB'),
         );
       });
@@ -465,6 +503,54 @@ class _ChatScreenState extends State<ChatScreen> {
       await save();
     } catch (error) {
       if (mounted) showProblem('Roleplay model download failed: $error');
+    } finally {
+      if (mounted) setState(() => downloading = false);
+    }
+  }
+
+  Future<void> downloadAdultVisionModel() async {
+    if (downloading || dataDir == null) return;
+    final directory = '${dataDir!.path}${Platform.pathSeparator}models';
+    setState(() {
+      downloading = true;
+      status =
+          'Downloading adult-capable vision model and projector (about 3 GB)…';
+    });
+    var lastProgress = '';
+    try {
+      final files = await downloader.downloadAdultVision(directory, (
+        name,
+        received,
+        total,
+      ) {
+        final progress =
+            '$name · ${received ~/ 1048576} MiB'
+            '${total == null ? '' : ' / ${total ~/ 1048576} MiB'}';
+        if (progress == lastProgress || !mounted) return;
+        lastProgress = progress;
+        setState(
+          () => status = name.startsWith('Verifying ')
+              ? progress
+              : 'Downloading $progress',
+        );
+      });
+      if (!models.any((item) => item.path == files.model)) {
+        models.add(
+          LocalModel(
+            'Qwen3 VL 4B Abliterated · vision',
+            files.model,
+            files.projector,
+          ),
+        );
+      }
+      modelPath = files.model;
+      if (mounted)
+        setState(
+          () => status = 'Adult vision model passed SHA-256 verification.',
+        );
+      await save();
+    } catch (error) {
+      if (mounted) showProblem('Vision model download failed: $error');
     } finally {
       if (mounted) setState(() => downloading = false);
     }
@@ -539,16 +625,28 @@ class _ChatScreenState extends State<ChatScreen> {
         final savedVideoPath = data['currentVideoPath'] as String?;
         if (savedVideoPath != null && await File(savedVideoPath).exists()) {
           currentVideoPath = savedVideoPath;
+          final savedPlayback = data['currentVideoPlaybackPath'] as String?;
+          currentVideoPlaybackPath =
+              savedPlayback != null && await File(savedPlayback).exists()
+              ? savedPlayback
+              : savedVideoPath;
           currentVideoDurationMs = data['currentVideoDurationMs'] as int?;
         }
         instructions = data['instructions'] as String? ?? instructions;
-        if (routingVersion == 0 &&
-            instructions ==
-                'You are a private, helpful local assistant. Answer directly and honestly.') {
-          instructions = 'You are a private local assistant. Answer the latest user message directly. Describe only details visible in attached images or video frames, including adult nudity when visible. Do not invent unseen anatomy, actions, or a story. Treat a user correction as newer information and do not repeat an earlier mistaken answer.';
+        if (routingVersion < 3 &&
+            (instructions ==
+                    'You are a private, helpful local assistant. Answer directly and honestly.' ||
+                instructions ==
+                    'You are a private local assistant. Answer the latest user message directly. Describe only details visible in attached images or video frames, including adult nudity when visible. Do not invent unseen anatomy, actions, or a story. Treat a user correction as newer information and do not repeat an earlier mistaken answer.')) {
+          instructions = defaultInstructions;
         }
+        final savedFrameCount = data['frameCount'] as int?;
+        // Older versions defaulted to eight large frames. Four smaller frames
+        // cover a short clip on an iPhone without making every send take minutes.
         frameCount =
-            (routingVersion == 0 ? 8 : (data['frameCount'] as int? ?? 8))
+            (routingVersion < 2 && savedFrameCount == 8
+                    ? 4
+                    : (savedFrameCount ?? 4))
                 .clamp(4, 12)
                 .toInt();
         maxTokens = data['maxTokens'] as int? ?? 400;
@@ -556,6 +654,9 @@ class _ChatScreenState extends State<ChatScreen> {
         if (!GlassPalette.presets.containsKey(themeName)) themeName = 'Aurora';
         customColor = Color(data['customColor'] as int? ?? 0xFF55C8FF);
         starColor = Color(data['starColor'] as int? ?? 0xFFB6DCFF);
+        starBackgroundColor = Color(
+          data['starBackgroundColor'] as int? ?? 0xFF091326,
+        );
         auroraColor = Color(data['auroraColor'] as int? ?? 0xFF58F6BA);
         backgroundStyle = data['backgroundStyle'] as String? ?? 'Waves';
         motion = data['motion'] as bool? ?? true;
@@ -620,6 +721,21 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         }
         for (final base in [
+          '$executableDir/models/qwen3-vl-4b-abliterated',
+          'D:/LocalAIChat/models/qwen3-vl-4b-abliterated',
+        ]) {
+          final path = '$base/${ModelDownloader.adultVisionName}';
+          final projector = '$base/${ModelDownloader.adultProjectorName}';
+          if (await File(path).exists() &&
+              await File(projector).exists() &&
+              !models.any((item) => item.path == path)) {
+            models.add(
+              LocalModel('Qwen3 VL 4B Abliterated · vision', path, projector),
+            );
+            break;
+          }
+        }
+        for (final base in [
           '$executableDir/models/qwen3-4b-nymphaea-rp',
           'D:/LocalAIChat/models/qwen3-4b-nymphaea-rp',
         ]) {
@@ -640,6 +756,7 @@ class _ChatScreenState extends State<ChatScreen> {
             'smolvlm2-500m',
             'qwen25-1.5b-abliterated',
             'qwen35-4b-uncensored',
+            'qwen3-vl-4b-abliterated',
             'qwen3-4b-nymphaea-rp',
           ]) {
             final candidate = '$executableDir/models/$folder/$filename';
@@ -715,11 +832,12 @@ class _ChatScreenState extends State<ChatScreen> {
         'models': models.map((item) => item.toJson()).toList(),
         'chats': chats.map((item) => item.toJson()).toList(),
         'modelPath': modelPath,
-        'routingVersion': 1,
+        'routingVersion': 3,
         'chatId': chatId,
         'draft': draft.text,
         'draftFrames': attachments.map((frame) => frame.toJson()).toList(),
         'currentVideoPath': currentVideoPath,
+        'currentVideoPlaybackPath': currentVideoPlaybackPath,
         'currentVideoDurationMs': currentVideoDurationMs,
         'instructions': instructions,
         'frameCount': frameCount,
@@ -727,6 +845,7 @@ class _ChatScreenState extends State<ChatScreen> {
         'themeName': themeName,
         'customColor': customColor.toARGB32(),
         'starColor': starColor.toARGB32(),
+        'starBackgroundColor': starBackgroundColor.toARGB32(),
         'auroraColor': auroraColor.toARGB32(),
         'backgroundStyle': backgroundStyle,
         'motion': motion,
@@ -744,13 +863,23 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void createChat({bool saveNow = true}) {
     if (busy || callActive) return;
+    final discarded = [
+      for (final frame in attachments) frame.path,
+      if (currentVideoPath != null) currentVideoPath!,
+      if (currentVideoPlaybackPath != null) currentVideoPlaybackPath!,
+    ];
     final id = DateTime.now().microsecondsSinceEpoch.toString();
     chats.insert(0, Conversation(id, 'New chat'));
     chatId = id;
     draft.clear();
     attachments.clear();
+    currentVideoPath = null;
+    currentVideoPlaybackPath = null;
+    currentVideoDurationMs = null;
     if (mounted) setState(() {});
-    if (saveNow) unawaited(save());
+    if (saveNow) {
+      unawaited(save().then((_) => deleteUnreferencedMedia(discarded)));
+    }
   }
 
   Future<bool> confirmDelete(String title, String message) async =>
@@ -781,7 +910,13 @@ class _ChatScreenState extends State<ChatScreen> {
     ))
       return;
     final paths = item.entries
-        .expand((entry) => entry.frames.map((frame) => frame.path))
+        .expand(
+          (entry) => [
+            for (final frame in entry.frames) frame.path,
+            if (entry.videoPath != null) entry.videoPath!,
+            if (entry.playbackPath != null) entry.playbackPath!,
+          ],
+        )
         .toList();
     setState(() {
       chats.remove(item);
@@ -802,7 +937,11 @@ class _ChatScreenState extends State<ChatScreen> {
       'This removes the message from this conversation.',
     ))
       return;
-    final paths = entry.frames.map((frame) => frame.path).toList();
+    final paths = [
+      for (final frame in entry.frames) frame.path,
+      if (entry.videoPath != null) entry.videoPath!,
+      if (entry.playbackPath != null) entry.playbackPath!,
+    ];
     setState(() {
       chat.entries.remove(entry);
       if (entry.role == 'user') {
@@ -820,16 +959,27 @@ class _ChatScreenState extends State<ChatScreen> {
     if (dataDir == null) return;
     final referenced = {
       for (final item in chats)
-        for (final entry in item.entries)
+        for (final entry in item.entries) ...[
           for (final frame in entry.frames) frame.path,
+          if (entry.videoPath != null) entry.videoPath!,
+          if (entry.playbackPath != null) entry.playbackPath!,
+        ],
       for (final frame in attachments) frame.path,
+      if (currentVideoPath != null) currentVideoPath!,
+      if (currentVideoPlaybackPath != null) currentVideoPlaybackPath!,
     };
     for (final path in paths.toSet()) {
-      final ownedMedia = ['media', 'frames'].any(
-        (folder) => path.startsWith(
-          '${dataDir!.path}${Platform.pathSeparator}$folder${Platform.pathSeparator}',
-        ),
-      );
+      final ownedMedia =
+          ['media', 'frames'].any(
+            (folder) => path.startsWith(
+              '${dataDir!.path}${Platform.pathSeparator}$folder${Platform.pathSeparator}',
+            ),
+          ) ||
+          (Platform.isWindows &&
+              path
+                  .replaceAll('/', '\\')
+                  .toLowerCase()
+                  .startsWith('d:\\localaichat\\media\\'));
       if (!ownedMedia || referenced.contains(path)) continue;
       final file = File(path);
       if (await file.exists()) await file.delete();
@@ -919,7 +1069,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<String> copyIntoApp(String path, String folder) async {
-    final dir = Directory(dataDir!.path + Platform.pathSeparator + folder);
+    final dir = Directory(
+      Platform.isWindows &&
+              folder == 'media' &&
+              await Directory('D:/LocalAIChat').exists()
+          ? 'D:/LocalAIChat/media'
+          : dataDir!.path + Platform.pathSeparator + folder,
+    );
     await dir.create(recursive: true);
     final name = path.split(RegExp(r'[/\\]')).last;
     final destination =
@@ -1119,15 +1275,28 @@ class _ChatScreenState extends State<ChatScreen> {
     final path = result?.files.single.path;
     if (path == null) return;
     if (samplingVideo || dataDir == null) return;
+    if (currentVideoPath != null) {
+      showProblem('Remove the current video before attaching another one.');
+      return;
+    }
     setState(() {
       samplingVideo = true;
-      status = 'Scanning video on this device…';
+      status = 'Saving video on this device…';
     });
+    String? ownedVideo;
+    String? playbackVideo;
     try {
-      final duration = (await VideoDuration.read(path)).inMilliseconds;
+      ownedVideo = await copyIntoApp(path, 'media');
+      final duration = (await VideoDuration.read(ownedVideo)).inMilliseconds;
       if (duration <= 0) throw StateError('Video duration is unavailable.');
+      if (mounted) setState(() => status = 'Preparing local video playback…');
+      playbackVideo = await VideoSampler.prepareWindowsPlayback(
+        source: ownedVideo,
+        destination: '$ownedVideo.playback.mp4',
+      );
+      if (mounted) setState(() => status = 'Scanning video on this device…');
       final frames = await VideoSampler.sample(
-        video: path,
+        video: ownedVideo,
         durationMs: duration,
         frameLimit: frameCount,
         outputDir: Directory('${dataDir!.path}${Platform.pathSeparator}frames'),
@@ -1140,13 +1309,19 @@ class _ChatScreenState extends State<ChatScreen> {
         attachments.addAll(
           frames.map((frame) => MediaFrame(frame.path, frame.timeMs)),
         );
-        currentVideoPath = path;
+        currentVideoPath = ownedVideo;
+        currentVideoPlaybackPath = playbackVideo;
         currentVideoDurationMs = duration;
         status =
-            'Kept ${frames.length} changed and time-spaced frames. Add an exact moment below if needed.';
+            'Video ready. The AI will inspect ${frames.length} selected frames.';
       });
       await save();
     } catch (error) {
+      for (final candidate in [playbackVideo, ownedVideo]) {
+        if (candidate == null) continue;
+        final file = File(candidate);
+        if (await file.exists()) await file.delete();
+      }
       showProblem('Video import failed: $error');
     } finally {
       if (mounted) setState(() => samplingVideo = false);
@@ -1251,7 +1426,32 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Future<void> send() async {
+  Future<void> removeDraftVideo() async {
+    final discarded = [
+      if (currentVideoPath != null) currentVideoPath!,
+      if (currentVideoPlaybackPath != null) currentVideoPlaybackPath!,
+      for (final frame in attachments)
+        if (frame.timeMs != null) frame.path,
+    ];
+    setState(() {
+      attachments.removeWhere((frame) => frame.timeMs != null);
+      currentVideoPath = null;
+      currentVideoPlaybackPath = null;
+      currentVideoDurationMs = null;
+    });
+    await save();
+    await deleteUnreferencedMedia(discarded);
+  }
+
+  void stopGeneration() {
+    cancelled = true;
+    activeGeneration?.cancel();
+    voiceEpoch++;
+    unawaited(speech?.stopSpeaking() ?? Future<void>.value());
+    if (mounted) setState(() => status = 'Stopping…');
+  }
+
+  Future<void> send({bool speakOnComplete = true}) async {
     if (busy || samplingVideo) return;
     if (dataDir == null) {
       showProblem(
@@ -1280,10 +1480,15 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     var model = initiallySelectedModel;
     if (inferenceFrames.isNotEmpty && !model.vision) {
+      final adultVision = models.where(
+        (candidate) => candidate.vision && candidate.name.contains('Qwen3 VL'),
+      );
       final detailed = models.where(
         (candidate) => candidate.vision && candidate.name.contains('Qwen3.5'),
       );
-      if (detailed.isNotEmpty) {
+      if (adultVision.isNotEmpty) {
+        model = adultVision.first;
+      } else if (detailed.isNotEmpty) {
         model = detailed.first;
       } else {
         for (final candidate in models) {
@@ -1322,12 +1527,15 @@ class _ChatScreenState extends State<ChatScreen> {
       'user',
       prompt.isEmpty ? 'Describe these images.' : prompt,
       List.of(attachments),
+      currentVideoPath,
+      currentVideoPlaybackPath,
     );
     final remembered = ChatContext.explicitMemory(question.text);
     if (remembered != null) {
       chat.memory = ChatContext.addMemory(chat.memory, remembered);
     }
     final originalVideoPath = currentVideoPath;
+    final originalVideoPlaybackPath = currentVideoPlaybackPath;
     final originalVideoDurationMs = currentVideoDurationMs;
     chat.entries.add(question);
     if (chat.title == 'New chat')
@@ -1337,6 +1545,7 @@ class _ChatScreenState extends State<ChatScreen> {
     draft.clear();
     attachments.clear();
     currentVideoPath = null;
+    currentVideoPlaybackPath = null;
     currentVideoDurationMs = null;
     final reply = ChatEntry('assistant', '');
     chat.entries.add(reply);
@@ -1345,8 +1554,10 @@ class _ChatScreenState extends State<ChatScreen> {
       cancelled = false;
       status = 'Loading model locally…';
     });
-    await save();
+    final cancellation = LlamaCancellationController();
+    activeGeneration = cancellation;
     try {
+      await save();
       final input = <LlamaResponseInputItem>[];
       final history = chat.entries
           .where(
@@ -1372,10 +1583,17 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
       final parts = <LlamaContentPart>[LlamaTextPart(question.text)];
-      if (inferenceFrames.isNotEmpty) {
+      final isVideo = inferenceFrames.any((frame) => frame.timeMs != null);
+      if (isVideo) {
         parts.add(
           const LlamaTextPart(
-            'Use only these attached frames as visual evidence. State the main visible actions and any visible nudity plainly. Do not guess body parts that are covered, too small to see, or inside the body. Do not make a repetitive body-part list. If the frames miss an event, say you cannot tell from these frames.',
+            'Describe the main foreground action across these video frames in 2 or 3 concise sentences. State clearly visible adult nudity or sexual activity in plain terms. Focus on what the person is doing; mention the background only when needed to understand the action. Do not guess what a screen displays or infer unseen movement, anatomy, or dialogue. If the frames cannot establish an action, say so briefly.',
+          ),
+        );
+      } else if (inferenceFrames.isNotEmpty) {
+        parts.add(
+          const LlamaTextPart(
+            'Use only these attached images as visual evidence. State the main visible actions and any visible nudity plainly. Do not guess body parts that are covered, too small to see, or inside the body. Do not make a repetitive body-part list.',
           ),
         );
       }
@@ -1393,6 +1611,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       input.add(LlamaResponseInputItem(role: 'user', content: parts));
       final client = LlamaOpenAIClient(
+        engine: LibLlamaCpp(cancellation: cancellation),
         models: {
           'active': LlamaModelConfig(
             modelPath: model.path,
@@ -1417,7 +1636,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ) +
             (model.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''),
         maxOutputTokens: model.vision && inferenceFrames.isNotEmpty
-            ? maxTokens.clamp(80, 260)
+            ? maxTokens.clamp(80, isVideo ? 160 : 260)
             : maxTokens,
         temperature: 0.65,
         topP: 0.90,
@@ -1436,10 +1655,66 @@ class _ChatScreenState extends State<ChatScreen> {
           }
           if (repeatedFrom != null || isRepeatingReply(visible)) {
             stoppedForLoop = true;
+            cancellation.cancel();
             break;
           }
         } else if (event is LlamaResponseFailed) {
           throw StateError(event.error.message);
+        }
+      }
+      if (!cancelled &&
+          !stoppedForLoop &&
+          inferenceFrames.isEmpty &&
+          (isEchoedReply(reply.text, question.text) ||
+              isDetachedMediaReply(reply.text, question.text))) {
+        final better = models
+            .where(
+              (candidate) =>
+                  !candidate.vision && candidate.name.contains('Nymphaea'),
+            )
+            .firstOrNull;
+        final retryModel = better ?? model;
+        if (mounted) {
+          setState(() {
+            reply.text = '';
+            status = 'Retrying a direct answer…';
+          });
+        }
+        final retryClient = LlamaOpenAIClient(
+          engine: LibLlamaCpp(cancellation: cancellation),
+          models: {
+            'retry': LlamaModelConfig(
+              modelPath: retryModel.path,
+              contextSize: 2048,
+              gpuLayerCount: 0,
+            ),
+          },
+        );
+        var retryRaw = '';
+        await for (final event in retryClient.responses.stream(
+          model: 'retry',
+          input: input,
+          instructions:
+              '${ChatContext.instructions(global: instructions, personality: chat.personality, customPersonality: chat.customPersonality, memory: chat.memory)}\nThis turn has no attached media. Answer the user’s question conversationally and directly. Do not echo the question or describe an image or frame.\n/no_think',
+          maxOutputTokens: maxTokens,
+          temperature: 0.7,
+          topP: 0.9,
+        )) {
+          if (cancelled) break;
+          if (event is LlamaResponseOutputTextDelta) {
+            retryRaw += event.delta;
+            if (mounted) setState(() => reply.text = visibleReply(retryRaw));
+          } else if (event is LlamaResponseFailed) {
+            throw StateError(event.error.message);
+          }
+        }
+        if (!cancelled &&
+            (isEchoedReply(reply.text, question.text) ||
+                isDetachedMediaReply(reply.text, question.text))) {
+          reply.text =
+              'I could not answer that clearly. Please try another model.';
+        } else if (!cancelled && retryModel.path != model.path) {
+          modelPath = retryModel.path;
         }
       }
       if (reply.text.isEmpty)
@@ -1457,18 +1732,52 @@ class _ChatScreenState extends State<ChatScreen> {
               : 'Ready',
         );
       }
+      if (!cancelled &&
+          speakOnComplete &&
+          autoSpeak &&
+          reply.text.isNotEmpty &&
+          !reply.text.startsWith('[')) {
+        final epoch = voiceEpoch;
+        try {
+          final service = speech;
+          if (service == null) {
+            throw StateError('Set up speech in Voice settings.');
+          }
+          if (mounted) setState(() => status = 'Preparing voice reply…');
+          final audioPath = await synthesizeReply(reply.text);
+          if (cancelled || epoch != voiceEpoch) {
+            final file = File(audioPath);
+            if (await file.exists()) await file.delete();
+          } else {
+            if (mounted) setState(() => status = 'Speaking…');
+            await service.playFile(audioPath);
+            if (mounted && !cancelled) setState(() => status = 'Ready');
+          }
+        } catch (error) {
+          if (mounted && !cancelled) {
+            setState(() => status = 'Voice failed: $error');
+          }
+        }
+      }
     } catch (error) {
+      if (cancelled) {
+        if (reply.text.isEmpty) reply.text = '[Stopped]';
+        if (mounted) setState(() => status = 'Stopped');
+        return;
+      }
       chat.entries.remove(reply);
       chat.entries.remove(question);
       if (draft.text.trim().isEmpty) draft.text = question.text;
       attachments.insertAll(0, question.frames);
       currentVideoPath = originalVideoPath;
+      currentVideoPlaybackPath = originalVideoPlaybackPath;
       currentVideoDurationMs = originalVideoDurationMs;
       final message = error.toString().contains('Failed to load model:')
           ? 'Could not load ${model.name}. Close other apps and retry; if it keeps failing, remove and download or import that model again. Your draft is saved.'
           : 'Local generation failed: $error';
       showProblem(message);
     } finally {
+      if (identical(activeGeneration, cancellation)) activeGeneration = null;
       if (mounted) setState(() => busy = false);
       await save();
     }
@@ -1478,8 +1787,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final service = speech;
     if (service == null || dataDir == null) return;
     if (voiceWorking && !voiceRecording) {
-      voiceEpoch++;
-      cancelled = true;
+      stopGeneration();
       await service.stopSpeaking();
       if (mounted)
         setState(() {
@@ -1502,7 +1810,7 @@ class _ChatScreenState extends State<ChatScreen> {
         draft.text = transcript;
         setState(() => status = 'Heard: ' + transcript);
         await save();
-        await send();
+        await send(speakOnComplete: false);
         if (epoch != voiceEpoch || !autoSpeak) return;
         final reply = chat.entries.isEmpty ? '' : chat.entries.last.text;
         if (reply.isEmpty || reply.startsWith('[')) return;
@@ -1556,7 +1864,11 @@ class _ChatScreenState extends State<ChatScreen> {
     final output =
         '${dataDir!.path}${Platform.pathSeparator}reply_${DateTime.now().microsecondsSinceEpoch}.$extension';
     if (voiceSource == 'Fish Audio') {
-      return FishVoice.synthesize(reply, fishVoiceId, output);
+      return FishVoice.synthesize(
+        FishVoice.performanceText(reply, chat.personality),
+        fishVoiceId,
+        output,
+      );
     }
     return speech!.synthesize(reply, output, voiceId: selectedVoice);
   }
@@ -1564,7 +1876,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> endVoiceCall() async {
     callEpoch++;
     callActive = false;
-    cancelled = true;
+    stopGeneration();
     final service = speech;
     if (service != null) {
       if (service.recording) {
@@ -1615,8 +1927,12 @@ class _ChatScreenState extends State<ChatScreen> {
               (voiceHits == 0 && elapsed > const Duration(seconds: 9)))
             break;
         }
+        final manuallySent = callSendNow;
         callSendNow = false;
-        if (!callActive || epoch != callEpoch || callMuted || voiceHits < 2) {
+        if (!callActive ||
+            epoch != callEpoch ||
+            callMuted ||
+            (voiceHits < 2 && !manuallySent)) {
           if (service.recording) await service.stopRecording();
           continue;
         }
@@ -1627,7 +1943,7 @@ class _ChatScreenState extends State<ChatScreen> {
         draft.text = transcript.trim();
         callStatus.value = 'You: ${transcript.trim()}';
         final before = chat.entries.length;
-        await send();
+        await send(speakOnComplete: false);
         if (!callActive || epoch != callEpoch || chat.entries.length <= before)
           continue;
         final answer = chat.entries.last;
@@ -1684,83 +2000,96 @@ class _ChatScreenState extends State<ChatScreen> {
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, update) => Dialog(
-          backgroundColor: Colors.transparent,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 460),
-            child: GlassSurface(
-              padding: const EdgeInsets.all(25),
-              radius: 30,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'Local voice call',
-                    style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 20),
-                  Container(
-                    width: 118,
-                    height: 118,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: RadialGradient(
-                        colors: [
-                          GlassPalette.resolve(themeName, customColor).accent,
-                          Colors.transparent,
-                        ],
+      builder: (dialogContext) => GlassDesign(
+        themeName: themeName,
+        customColor: customColor,
+        starColor: starColor,
+        starBackgroundColor: starBackgroundColor,
+        auroraColor: auroraColor,
+        motion: motion,
+        speed: motionSpeed,
+        backgroundStyle: backgroundStyle,
+        child: StatefulBuilder(
+          builder: (dialogContext, update) => Dialog(
+            backgroundColor: Colors.transparent,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: GlassSurface(
+                padding: const EdgeInsets.all(25),
+                radius: 30,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Local voice call',
+                      style: TextStyle(
+                        fontSize: 25,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
-                    child: const Icon(Icons.graphic_eq, size: 58),
-                  ),
-                  const SizedBox(height: 18),
-                  ValueListenableBuilder<String>(
-                    valueListenable: callStatus,
-                    builder: (context, value, _) =>
-                        Text(value, textAlign: TextAlign.center),
-                  ),
-                  const SizedBox(height: 18),
-                  if (voiceSource == 'Offline')
-                    DropdownButton<int>(
-                      value: selectedVoice,
-                      items: SpeechService.voices
-                          .map(
-                            (item) => DropdownMenuItem(
-                              value: item.id,
-                              child: Text('${item.name} · ${item.gender}'),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (value) {
-                        if (value == null) return;
-                        update(() => selectedVoice = value);
-                        unawaited(save());
-                      },
+                    const SizedBox(height: 20),
+                    Container(
+                      width: 118,
+                      height: 118,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: RadialGradient(
+                          colors: [
+                            GlassPalette.resolve(themeName, customColor).accent,
+                            Colors.transparent,
+                          ],
+                        ),
+                      ),
+                      child: const Icon(Icons.graphic_eq, size: 58),
                     ),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    alignment: WrapAlignment.center,
-                    spacing: 12,
-                    children: [
-                      OutlinedButton.icon(
-                        onPressed: () => update(() => callMuted = !callMuted),
-                        icon: Icon(callMuted ? Icons.mic_off : Icons.mic),
-                        label: Text(callMuted ? 'Unmute' : 'Mute'),
+                    const SizedBox(height: 18),
+                    ValueListenableBuilder<String>(
+                      valueListenable: callStatus,
+                      builder: (context, value, _) =>
+                          Text(value, textAlign: TextAlign.center),
+                    ),
+                    const SizedBox(height: 18),
+                    if (voiceSource == 'Offline')
+                      DropdownButton<int>(
+                        value: selectedVoice,
+                        items: SpeechService.voices
+                            .map(
+                              (item) => DropdownMenuItem(
+                                value: item.id,
+                                child: Text('${item.name} · ${item.gender}'),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) {
+                          if (value == null) return;
+                          update(() => selectedVoice = value);
+                          unawaited(save());
+                        },
                       ),
-                      OutlinedButton.icon(
-                        onPressed: () => callSendNow = true,
-                        icon: const Icon(Icons.send),
-                        label: const Text('Send now'),
-                      ),
-                      FilledButton.icon(
-                        onPressed: () => Navigator.pop(dialogContext),
-                        icon: const Icon(Icons.call_end),
-                        label: const Text('End call'),
-                      ),
-                    ],
-                  ),
-                ],
+                    const SizedBox(height: 12),
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      spacing: 12,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: () => update(() => callMuted = !callMuted),
+                          icon: Icon(callMuted ? Icons.mic_off : Icons.mic),
+                          label: Text(callMuted ? 'Unmute' : 'Mute'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () => callSendNow = true,
+                          icon: const Icon(Icons.send),
+                          label: const Text('Send now'),
+                        ),
+                        FilledButton.icon(
+                          onPressed: () => Navigator.pop(dialogContext),
+                          icon: const Icon(Icons.call_end),
+                          label: const Text('End call'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -1840,6 +2169,16 @@ class _ChatScreenState extends State<ChatScreen> {
                               },
                         icon: const Icon(Icons.visibility_outlined),
                         label: const Text('Get detailed vision model · 3 GB'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: downloading
+                            ? null
+                            : () async {
+                                await downloadAdultVisionModel();
+                                update(() {});
+                              },
+                        icon: const Icon(Icons.visibility),
+                        label: const Text('Get adult-capable vision · 3 GB'),
                       ),
                       OutlinedButton.icon(
                         onPressed: downloading
@@ -1942,12 +2281,20 @@ class _ChatScreenState extends State<ChatScreen> {
     final speechController = TextEditingController(text: speechRoot ?? '');
     var selectedCustom = customColor;
     var selectedStar = starColor;
+    var selectedStarBackground = starBackgroundColor;
     var selectedAurora = auroraColor;
     final colorController = TextEditingController(
       text: customColor.toARGB32().toRadixString(16).substring(2).toUpperCase(),
     );
     final starColorController = TextEditingController(
       text: starColor.toARGB32().toRadixString(16).substring(2).toUpperCase(),
+    );
+    final starBackgroundController = TextEditingController(
+      text: starBackgroundColor
+          .toARGB32()
+          .toRadixString(16)
+          .substring(2)
+          .toUpperCase(),
     );
     final auroraColorController = TextEditingController(
       text: auroraColor.toARGB32().toRadixString(16).substring(2).toUpperCase(),
@@ -1964,6 +2311,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final fishIdController = TextEditingController(text: fishVoiceId);
     final fishKeyController = TextEditingController();
     var keySaved = fishHasKey;
+    var fishTestStatus = '';
     await showDialog<void>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -2046,6 +2394,25 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             ),
                             const SizedBox(width: 10),
+                            IconButton(
+                              tooltip: 'Pick any custom color',
+                              icon: const Icon(Icons.colorize),
+                              onPressed: () async {
+                                final chosen = await pickCustomColor(
+                                  context,
+                                  selectedCustom,
+                                );
+                                if (chosen != null)
+                                  update(() {
+                                    selectedCustom = chosen;
+                                    colorController.text = chosen
+                                        .toARGB32()
+                                        .toRadixString(16)
+                                        .substring(2)
+                                        .toUpperCase();
+                                  });
+                              },
+                            ),
                             Expanded(
                               child: TextField(
                                 controller: colorController,
@@ -2148,6 +2515,35 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             ),
                             const SizedBox(width: 10),
+                            IconButton(
+                              tooltip: 'Pick any color',
+                              icon: const Icon(Icons.colorize),
+                              onPressed: () async {
+                                final isStar = selectedStyle == 'Starfield';
+                                final chosen = await pickCustomColor(
+                                  context,
+                                  isStar ? selectedStar : selectedAurora,
+                                );
+                                if (chosen != null)
+                                  update(() {
+                                    if (isStar) {
+                                      selectedStar = chosen;
+                                      starColorController.text = chosen
+                                          .toARGB32()
+                                          .toRadixString(16)
+                                          .substring(2)
+                                          .toUpperCase();
+                                    } else {
+                                      selectedAurora = chosen;
+                                      auroraColorController.text = chosen
+                                          .toARGB32()
+                                          .toRadixString(16)
+                                          .substring(2)
+                                          .toUpperCase();
+                                    }
+                                  });
+                              },
+                            ),
                             Expanded(
                               child: TextField(
                                 controller: selectedStyle == 'Starfield'
@@ -2211,6 +2607,60 @@ class _ChatScreenState extends State<ChatScreen> {
                           }),
                         ),
                       ],
+                      if (selectedStyle == 'Starfield')
+                        Row(
+                          children: [
+                            Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                color: selectedStarBackground,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            IconButton(
+                              tooltip: 'Pick star background color',
+                              icon: const Icon(Icons.colorize),
+                              onPressed: () async {
+                                final chosen = await pickCustomColor(
+                                  context,
+                                  selectedStarBackground,
+                                );
+                                if (chosen != null)
+                                  update(() {
+                                    selectedStarBackground = chosen;
+                                    starBackgroundController.text = chosen
+                                        .toARGB32()
+                                        .toRadixString(16)
+                                        .substring(2)
+                                        .toUpperCase();
+                                  });
+                              },
+                            ),
+                            Expanded(
+                              child: TextField(
+                                controller: starBackgroundController,
+                                maxLength: 6,
+                                decoration: const InputDecoration(
+                                  labelText: 'Star background (hex)',
+                                  prefixText: '#',
+                                ),
+                                onChanged: (value) {
+                                  if (RegExp(r'^[0-9a-fA-F]{6}$')
+                                      .hasMatch(value)) {
+                                    update(
+                                      () => selectedStarBackground = Color(
+                                        0xFF000000 |
+                                            int.parse(value, radix: 16),
+                                      ),
+                                    );
+                                  }
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
                       SwitchListTile(
                         title: const Text('Motion'),
                         value: animated,
@@ -2335,6 +2785,46 @@ class _ChatScreenState extends State<ChatScreen> {
                                 : 'Fish Audio API key',
                           ),
                         ),
+                        TextButton.icon(
+                          icon: const Icon(Icons.play_arrow),
+                          label: const Text('Test this Fish voice'),
+                          onPressed: () async {
+                            if (dataDir == null || speech == null) return;
+                            update(
+                              () => fishTestStatus = 'Preparing voice sample…',
+                            );
+                            try {
+                              if (fishKeyController.text.trim().isNotEmpty) {
+                                await FishVoice.saveKey(fishKeyController.text);
+                                update(() => keySaved = true);
+                              }
+                              final path =
+                                  '${dataDir!.path}${Platform.pathSeparator}fish_voice_test.mp3';
+                              await FishVoice.synthesize(
+                                FishVoice.performanceText(
+                                  'This is how I sound in this conversation.',
+                                  chat.personality,
+                                ),
+                                fishIdController.text,
+                                path,
+                              );
+                              update(
+                                () => fishTestStatus = 'Playing voice sample…',
+                              );
+                              await speech!.playFile(path);
+                              update(
+                                () => fishTestStatus =
+                                    'Voice played successfully.',
+                              );
+                            } catch (error) {
+                              update(
+                                () => fishTestStatus =
+                                    'Voice test failed: $error',
+                              );
+                            }
+                          },
+                        ),
+                        if (fishTestStatus.isNotEmpty) Text(fishTestStatus),
                         if (keySaved)
                           TextButton(
                             onPressed: () async {
@@ -2383,6 +2873,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   themeName = selectedTheme;
                   customColor = selectedCustom;
                   starColor = selectedStar;
+                  starBackgroundColor = selectedStarBackground;
                   auroraColor = selectedAurora;
                   backgroundStyle = selectedStyle;
                   motion = animated;
@@ -2413,10 +2904,62 @@ class _ChatScreenState extends State<ChatScreen> {
     speechController.dispose();
     colorController.dispose();
     starColorController.dispose();
+    starBackgroundController.dispose();
     auroraColorController.dispose();
     fishIdController.dispose();
     fishKeyController.dispose();
   }
+
+  Widget videoPreview(
+    String playbackPath,
+    String? posterPath, {
+    double width = 230,
+    double height = 170,
+    bool compact = false,
+  }) => InkWell(
+    onTap: () => showLocalVideo(context, playbackPath),
+    borderRadius: BorderRadius.circular(13),
+    child: Container(
+      width: width,
+      height: height,
+      margin: const EdgeInsets.only(bottom: 8),
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Colors.black87,
+        borderRadius: BorderRadius.circular(13),
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (posterPath != null)
+            Image.file(File(posterPath), fit: BoxFit.cover),
+          Center(
+            child: CircleAvatar(
+              radius: compact ? 19 : 27,
+              backgroundColor: Colors.black54,
+              child: const Icon(
+                Icons.play_arrow,
+                color: Colors.white,
+                size: 28,
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 8,
+            left: 10,
+            child: Text(
+              compact ? 'Video' : 'Video · tap to play',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+                shadows: [Shadow(blurRadius: 5, color: Colors.black)],
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 
   Widget messageBubble(ChatEntry entry) => Align(
     alignment: entry.role == 'user'
@@ -2472,20 +3015,33 @@ class _ChatScreenState extends State<ChatScreen> {
               ],
             ),
             const SizedBox(height: 7),
-            for (final frame in entry.frames) ...[
+            if (entry.videoPath != null)
+              videoPreview(
+                entry.playbackPath ?? entry.videoPath!,
+                entry.frames
+                    .where((frame) => frame.timeMs != null)
+                    .firstOrNull
+                    ?.path,
+              ),
+            for (final frame in entry.frames.where(
+              (frame) => entry.videoPath == null || frame.timeMs == null,
+            )) ...[
               if (frame.timeMs != null)
                 Text(
                   'Frame at ' +
                       (frame.timeMs! / 1000).toStringAsFixed(1) +
                       ' s',
                 ),
-              Image.file(
-                File(frame.path),
-                width: 230,
-                height: 160,
-                fit: BoxFit.contain,
-                errorBuilder: (context, error, stack) =>
-                    const Text('Media unavailable'),
+              InkWell(
+                onTap: () => showLocalImage(context, frame.path),
+                child: Image.file(
+                  File(frame.path),
+                  width: 230,
+                  height: 160,
+                  fit: BoxFit.contain,
+                  errorBuilder: (context, error, stack) =>
+                      const Text('Media unavailable'),
+                ),
               ),
             ],
             SelectableText(entry.text.isEmpty ? '…' : entry.text),
@@ -2503,6 +3059,7 @@ class _ChatScreenState extends State<ChatScreen> {
       themeName: themeName,
       customColor: customColor,
       starColor: starColor,
+      starBackgroundColor: starBackgroundColor,
       auroraColor: auroraColor,
       motion: motion,
       speed: motionSpeed,
@@ -2684,15 +3241,49 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   if (attachments.isNotEmpty)
                     SizedBox(
-                      height: 82,
+                      height: 86,
                       child: ListView(
                         scrollDirection: Axis.horizontal,
-                        children: attachments
-                            .map(
-                              (frame) => Stack(
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.all(4),
+                        children: [
+                          if (currentVideoPath != null)
+                            Stack(
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.all(4),
+                                  child: videoPreview(
+                                    currentVideoPlaybackPath ??
+                                        currentVideoPath!,
+                                    attachments
+                                        .where((frame) => frame.timeMs != null)
+                                        .firstOrNull
+                                        ?.path,
+                                    width: 100,
+                                    height: 76,
+                                    compact: true,
+                                  ),
+                                ),
+                                Positioned(
+                                  right: 0,
+                                  child: IconButton.filledTonal(
+                                    tooltip: 'Remove video',
+                                    iconSize: 14,
+                                    onPressed: () =>
+                                        unawaited(removeDraftVideo()),
+                                    icon: const Icon(Icons.close),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          for (final frame in attachments.where(
+                            (frame) => frame.timeMs == null,
+                          ))
+                            Stack(
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.all(4),
+                                  child: InkWell(
+                                    onTap: () =>
+                                        showLocalImage(context, frame.path),
                                     child: Image.file(
                                       File(frame.path),
                                       width: 100,
@@ -2700,23 +3291,21 @@ class _ChatScreenState extends State<ChatScreen> {
                                       fit: BoxFit.cover,
                                     ),
                                   ),
-                                  Positioned(
-                                    right: 0,
-                                    child: IconButton.filledTonal(
-                                      iconSize: 14,
-                                      onPressed: () {
-                                        setState(
-                                          () => attachments.remove(frame),
-                                        );
-                                        unawaited(save());
-                                      },
-                                      icon: const Icon(Icons.close),
-                                    ),
+                                ),
+                                Positioned(
+                                  right: 0,
+                                  child: IconButton.filledTonal(
+                                    iconSize: 14,
+                                    onPressed: () {
+                                      setState(() => attachments.remove(frame));
+                                      unawaited(save());
+                                    },
+                                    icon: const Icon(Icons.close),
                                   ),
-                                ],
-                              ),
-                            )
-                            .toList(),
+                                ),
+                              ],
+                            ),
+                        ],
                       ),
                     ),
                   if (busy || samplingVideo)
@@ -2806,9 +3395,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             ),
                             IconButton.filled(
                               tooltip: busy ? 'Stop' : 'Send',
-                              onPressed: busy
-                                  ? () => setState(() => cancelled = true)
-                                  : send,
+                              onPressed: busy ? stopGeneration : () => send(),
                               icon: Icon(
                                 busy ? Icons.stop : Icons.arrow_upward,
                               ),

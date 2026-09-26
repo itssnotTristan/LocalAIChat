@@ -8,6 +8,7 @@ import 'package:lib_llama_cpp/lib_llama_cpp.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:video_player/video_player.dart';
 
 import 'speech_service.dart';
 import 'chat_context.dart';
@@ -18,9 +19,11 @@ import 'video_sampler.dart';
 Future<void> runKeychainSelfTest(List<String> args) async {
   const storage = FlutterSecureStorage();
   const key = 'local_ai_chat_keychain_probe';
-  final report = File(args.length > 1
-      ? args[1]
-      : '${(await getApplicationSupportDirectory()).path}/keychain-test.json');
+  final report = File(
+    args.length > 1
+        ? args[1]
+        : '${(await getApplicationSupportDirectory()).path}/keychain-test.json',
+  );
   await report.parent.create(recursive: true);
   try {
     await storage.write(key: key, value: 'probe');
@@ -104,7 +107,32 @@ Future<void> runPersonalitySelfTest(List<String> args) async {
       'Hi. I lost my keys again. What do you think?',
     );
     await ask('flirty', 'Horny', '', 'Hi. Flirt with me.');
-    output['ok'] = (output['memory'] as String).toLowerCase().contains('green');
+    await ask('directQuestion', 'Horny', '', 'Do you want to see my penis?');
+    await ask(
+      'principled',
+      'Principled',
+      '',
+      'A friend shared a private photo of me without asking. Was that okay?',
+    );
+    final principled = (output['principled'] as String).toLowerCase();
+    output['ok'] =
+        (output['memory'] as String).toLowerCase().contains('green') &&
+        !isEchoedReply(
+          output['directQuestion'] as String,
+          'Do you want to see my penis?',
+        ) &&
+        !isDetachedMediaReply(
+          output['directQuestion'] as String,
+          'Do you want to see my penis?',
+        ) &&
+        (principled.contains('no') ||
+            principled.contains('not okay') ||
+            principled.contains('rude') ||
+            principled.contains('wrong') ||
+            principled.contains('violation')) &&
+        (principled.contains('consent') ||
+            principled.contains('permission') ||
+            principled.contains('privacy'));
   } catch (error) {
     output['ok'] = false;
     output['error'] = error.toString();
@@ -206,6 +234,174 @@ Future<void> runVisionProbe(List<String> args) async {
     await report.writeAsString(
       jsonEncode({'ok': false, 'error': error.toString()}),
     );
+  }
+}
+
+/// Uses the same sampler and multimodal request path as the chat screen.
+Future<void> runVideoProbe(List<String> args) async {
+  if (args.length < 5) throw ArgumentError('Missing video probe arguments.');
+  final report = File(args[1]);
+  await report.parent.create(recursive: true);
+  final framesFolder = Directory('${report.parent.path}/video-probe-frames');
+  final output = <String, dynamic>{'video': args[4]};
+  final frameLimit = args.length > 5 ? int.parse(args[5]) : 4;
+  try {
+    final duration = await VideoDuration.read(args[4]);
+    output['durationMs'] = duration.inMilliseconds;
+    final frames = await VideoSampler.sample(
+      video: args[4],
+      durationMs: duration.inMilliseconds,
+      frameLimit: frameLimit,
+      outputDir: framesFolder,
+    );
+    output['frames'] = [
+      for (final frame in frames) {'timeMs': frame.timeMs, 'path': frame.path},
+    ];
+    output['frameLimit'] = frameLimit;
+    await report.writeAsString(jsonEncode(output));
+    final parts = <LlamaContentPart>[
+      const LlamaTextPart(
+        'Describe the main foreground action across these video frames in 2 or 3 concise sentences. State clearly visible adult nudity or sexual activity in plain terms. Focus on what the person is doing; mention the background only when needed to understand the action. Do not guess what a screen displays or infer unseen movement, anatomy, or dialogue. If the frames cannot establish an action, say so briefly.',
+      ),
+    ];
+    for (final frame in frames) {
+      parts.add(
+        LlamaTextPart(
+          'Frame at ${(frame.timeMs / 1000).toStringAsFixed(1)} seconds:',
+        ),
+      );
+      parts.add(LlamaImageFilePart(path: frame.path));
+    }
+    final client = LlamaOpenAIClient(
+      models: {
+        'probe': LlamaModelConfig(
+          modelPath: args[2],
+          mmprojPath: args[3],
+          contextSize: 4096,
+          gpuLayerCount: 0,
+        ),
+      },
+    );
+    final answer = StringBuffer();
+    var reportedAt = 0;
+    output['stage'] = 'generating';
+    await report.writeAsString(jsonEncode(output));
+    await for (final event in client.responses.stream(
+      model: 'probe',
+      input: [LlamaResponseInputItem(role: 'user', content: parts)],
+      instructions: 'Answer from visual evidence only. Write natural prose without repetitive body-part lists. /no_think',
+      maxOutputTokens: 160,
+      temperature: 0.65,
+      topP: 0.90,
+    )) {
+      if (event is LlamaResponseOutputTextDelta) {
+        answer.write(event.delta);
+        if (answer.length - reportedAt >= 40) {
+          reportedAt = answer.length;
+          output['partialAnswer'] = answer.toString();
+          await report.writeAsString(jsonEncode(output));
+        }
+      }
+      if (event is LlamaResponseFailed) throw StateError(event.error.message);
+    }
+    output['answer'] = answer.toString();
+    output['ok'] = true;
+  } catch (error) {
+    output['ok'] = false;
+    output['error'] = '$error';
+  }
+  await report.writeAsString(
+    const JsonEncoder.withIndent('  ').convert(output),
+  );
+}
+
+Future<void> runPlaybackProbe(List<String> args) async {
+  if (args.length < 3) throw ArgumentError('Missing playback probe arguments.');
+  final report = File(args[1]);
+  await report.parent.create(recursive: true);
+  final prepared = '${report.parent.path}/playback-probe.mp4';
+  final output = <String, dynamic>{'source': args[2], 'prepared': prepared};
+  VideoPlayerController? controller;
+  try {
+    await VideoSampler.prepareWindowsPlayback(
+      source: args[2],
+      destination: prepared,
+    );
+    controller = VideoPlayerController.file(File(prepared));
+    await controller.initialize();
+    output['durationMs'] = controller.value.duration.inMilliseconds;
+    output['width'] = controller.value.size.width;
+    output['height'] = controller.value.size.height;
+    await controller.play();
+    await Future.delayed(const Duration(seconds: 2));
+    output['positionMs'] = controller.value.position.inMilliseconds;
+    output['ok'] =
+        controller.value.isInitialized &&
+        (output['durationMs'] as int) > 0 &&
+        (output['positionMs'] as int) > 0;
+  } catch (error) {
+    output['ok'] = false;
+    output['error'] = '$error';
+  } finally {
+    await controller?.dispose();
+    await report.writeAsString(jsonEncode(output));
+  }
+  if (output['ok'] != true) exit(2);
+}
+
+Future<void> runStopProbe(List<String> args) async {
+  if (args.length < 3) throw ArgumentError('Missing stop probe arguments.');
+  final report = File(args[1]);
+  await report.parent.create(recursive: true);
+  final cancellation = LlamaCancellationController();
+  final client = LlamaOpenAIClient(
+    engine: LibLlamaCpp(cancellation: cancellation),
+    models: {
+      'probe': LlamaModelConfig(
+        modelPath: args[2],
+        contextSize: 2048,
+        gpuLayerCount: 0,
+      ),
+    },
+  );
+  var sawText = false;
+  var stopped = false;
+  final watch = Stopwatch();
+  try {
+    await for (final event in client.responses.stream(
+      model: 'probe',
+      input: [
+        LlamaResponseInputItem(
+          role: 'user',
+          content: [
+            const LlamaTextPart(
+              'Count from 1 to 1000, printing each number on a new line.',
+            ),
+          ],
+        ),
+      ],
+      maxOutputTokens: 1000,
+      temperature: 0.2,
+    )) {
+      if (event is LlamaResponseOutputTextDelta && !sawText) {
+        sawText = true;
+        Future<void>.delayed(const Duration(milliseconds: 200), () {
+          watch.start();
+          stopped = true;
+          cancellation.cancel();
+        });
+      }
+      if (event is LlamaResponseFailed) throw StateError(event.error.message);
+    }
+    final result = {
+      'ok': sawText && stopped && watch.elapsed < const Duration(seconds: 3),
+      'sawText': sawText,
+      'cancelled': stopped,
+      'stopMs': watch.elapsedMilliseconds,
+    };
+    await report.writeAsString(jsonEncode(result));
+  } catch (error) {
+    await report.writeAsString(jsonEncode({'ok': false, 'error': '$error'}));
   }
 }
 

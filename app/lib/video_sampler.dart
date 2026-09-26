@@ -12,15 +12,64 @@ class VideoSample {
 }
 
 class _Candidate {
-  const _Candidate(this.timeMs, this.signature);
+  const _Candidate(this.timeMs, this.signature, {this.path});
   final int timeMs;
   final Uint8List signature;
+  final String? path;
 }
 
 /// Scans short clips at up to eight positions per second and keeps both
 /// time-spaced coverage and visually changed moments. A user can also add an
 /// exact timestamp through [extractAt].
 class VideoSampler {
+  /// Windows Media Foundation may not play iPhone HEVC/Dolby Vision files.
+  /// Keep the original for analysis and create a local H.264 viewing copy.
+  static Future<String> prepareWindowsPlayback({
+    required String source,
+    required String destination,
+  }) async {
+    if (!Platform.isWindows) return source;
+    final ffmpeg = await _ffmpegExecutable();
+    if (ffmpeg == null) {
+      throw StateError('FFmpeg is required to play this video on Windows.');
+    }
+    final result = await Process.run(ffmpeg, [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-threads',
+      '4',
+      '-i',
+      source,
+      '-map',
+      '0:v:0',
+      '-map',
+      '0:a:0?',
+      '-vf',
+      'scale=1280:1280:force_original_aspect_ratio=decrease:force_divisible_by=2',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '21',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '160k',
+      '-movflags',
+      '+faststart',
+      destination,
+    ]);
+    if (result.exitCode != 0 || !await File(destination).exists()) {
+      throw StateError('Could not prepare video playback: ${result.stderr}');
+    }
+    return destination;
+  }
+
   static Future<List<VideoSample>> sample({
     required String video,
     required int durationMs,
@@ -36,22 +85,66 @@ class VideoSampler {
     final count = math.min(240, math.max(16, (durationMs / 125).ceil()));
     final candidates = <_Candidate>[];
     try {
-      for (var i = 0; i < count; i++) {
-        final timeMs = ((i + 0.5) * durationMs / count).round();
-        final path = '${scanDir.path}${Platform.pathSeparator}$i.jpg';
-        final output = await FlutterVideoThumbnailPlus.thumbnailFile(
-          video: video,
-          thumbnailPath: path,
-          imageFormat: ImageFormat.jpeg,
-          maxWidth: 128,
-          maxHeight: 128,
-          quality: 55,
-          timeMs: timeMs,
-        );
-        if (output != null && await File(output).exists()) {
-          candidates.add(_Candidate(timeMs, await _signature(output)));
+      final ffmpeg = await _ffmpegExecutable();
+      if (ffmpeg != null) {
+        final template =
+            '${scanDir.path}${Platform.pathSeparator}frame_%04d.jpg';
+        final result = await Process.run(ffmpeg, [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-y',
+          '-threads',
+          '4',
+          '-i',
+          video,
+          '-vf',
+          'fps=8,scale=512:512:force_original_aspect_ratio=decrease',
+          '-frames:v',
+          count.toString(),
+          '-q:v',
+          '3',
+          template,
+        ]);
+        if (result.exitCode != 0) {
+          throw StateError('Could not decode video: ${result.stderr}');
         }
-        if (i % 8 == 0 || i + 1 == count) onProgress?.call(i + 1, count);
+        final files =
+            await scanDir
+                  .list()
+                  .where((entry) => entry is File)
+                  .cast<File>()
+                  .toList()
+              ..sort((a, b) => a.path.compareTo(b.path));
+        for (var i = 0; i < files.length; i++) {
+          candidates.add(
+            _Candidate(
+              math.min(i * 125, durationMs - 1),
+              await _signature(files[i].path),
+              path: files[i].path,
+            ),
+          );
+          if (i % 8 == 0 || i + 1 == files.length)
+            onProgress?.call(i + 1, files.length);
+        }
+      } else {
+        for (var i = 0; i < count; i++) {
+          final timeMs = ((i + 0.5) * durationMs / count).round();
+          final path = '${scanDir.path}${Platform.pathSeparator}$i.jpg';
+          final output = await FlutterVideoThumbnailPlus.thumbnailFile(
+            video: video,
+            thumbnailPath: path,
+            imageFormat: ImageFormat.jpeg,
+            maxWidth: 128,
+            maxHeight: 128,
+            quality: 55,
+            timeMs: timeMs,
+          );
+          if (output != null && await File(output).exists()) {
+            candidates.add(_Candidate(timeMs, await _signature(output)));
+          }
+          if (i % 8 == 0 || i + 1 == count) onProgress?.call(i + 1, count);
+        }
       }
       if (candidates.isEmpty) {
         throw StateError('Could not decode any frames from this video.');
@@ -62,13 +155,23 @@ class VideoSampler {
       );
       final results = <VideoSample>[];
       for (final index in selected) {
-        results.add(
-          await extractAt(
-            video: video,
-            timeMs: candidates[index].timeMs,
-            outputDir: outputDir,
-          ),
-        );
+        final candidate = candidates[index];
+        if (candidate.path != null) {
+          final path =
+              '${outputDir.path}${Platform.pathSeparator}'
+              '${DateTime.now().microsecondsSinceEpoch}_${candidate.timeMs}.jpg';
+          await File(candidate.path!).copy(path);
+          results.add(VideoSample(path, candidate.timeMs));
+        } else {
+          results.add(
+            await extractAt(
+              video: video,
+              timeMs: candidate.timeMs,
+              outputDir: outputDir,
+              maxDimension: 512,
+            ),
+          );
+        }
       }
       return results;
     } finally {
@@ -80,17 +183,46 @@ class VideoSampler {
     required String video,
     required int timeMs,
     required Directory outputDir,
+    int maxDimension = 768,
   }) async {
     await outputDir.create(recursive: true);
     final path =
         '${outputDir.path}${Platform.pathSeparator}'
         '${DateTime.now().microsecondsSinceEpoch}_$timeMs.jpg';
+    final ffmpeg = await _ffmpegExecutable();
+    if (ffmpeg != null) {
+      final result = await Process.run(ffmpeg, [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-y',
+        '-threads',
+        '4',
+        '-ss',
+        (timeMs / 1000).toStringAsFixed(3),
+        '-i',
+        video,
+        '-frames:v',
+        '1',
+        '-vf',
+        'scale=$maxDimension:$maxDimension:force_original_aspect_ratio=decrease',
+        '-q:v',
+        '3',
+        path,
+      ]);
+      if (result.exitCode != 0 || !await File(path).exists()) {
+        throw StateError(
+          'Could not extract the video frame at $timeMs ms: ${result.stderr}',
+        );
+      }
+      return VideoSample(path, timeMs);
+    }
     final output = await FlutterVideoThumbnailPlus.thumbnailFile(
       video: video,
       thumbnailPath: path,
       imageFormat: ImageFormat.jpeg,
-      maxWidth: 768,
-      maxHeight: 768,
+      maxWidth: maxDimension,
+      maxHeight: maxDimension,
       quality: 82,
       timeMs: timeMs,
     );
@@ -100,9 +232,25 @@ class VideoSampler {
     return VideoSample(output, timeMs);
   }
 
+  static Future<String?> _ffmpegExecutable() async {
+    if (!Platform.isWindows) return null;
+    final bundled =
+        '${File(Platform.resolvedExecutable).parent.path}${Platform.pathSeparator}ffmpeg.exe';
+    for (final path in [
+      bundled,
+      Platform.environment['LOCAL_AI_FFMPEG'],
+      'D:\\LocalAIChat\\tools\\ffmpeg.exe',
+    ]) {
+      if (path != null && await File(path).exists()) return path;
+    }
+    return null;
+  }
+
   static List<int> _select(List<_Candidate> frames, int limit) {
     final chosen = <int>{};
-    final anchors = math.max(2, limit ~/ 3);
+    chosen.add(0);
+    if (limit > 1) chosen.add(frames.length - 1);
+    final anchors = math.max(1, limit ~/ 4);
     for (var i = 0; i < anchors; i++) {
       chosen.add(
         ((i + 0.5) * frames.length / anchors).floor().clamp(
@@ -124,7 +272,7 @@ class VideoSampler {
           : 0.0;
       scores[i] = math.max(math.max(previous, next), distant);
     }
-    final minimumGap = math.max(1, frames.length ~/ (limit * 3));
+    final minimumGap = math.max(1, frames.length ~/ (limit * 2));
     bool addIfDistinct(int index) {
       if (chosen.any((other) => (other - index).abs() < minimumGap))
         return false;
