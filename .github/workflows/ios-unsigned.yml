@@ -21,6 +21,29 @@ jobs:
       - name: Fetch dependencies
         working-directory: app
         run: flutter pub get
+      - name: Install pinned iOS Metal inference library
+        working-directory: app
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/gsmlg-app/lib_llama_cpp/releases/download/v0.7.3/lib_llama_cpp-prebuilt-metal-0.7.3.tar.gz \
+            -o "$RUNNER_TEMP/llama-metal.tar.gz"
+          echo 'abb6feb421eebd881d314a4132ce0951427b66beed91a7581e466cae6e1436c2  '"$RUNNER_TEMP/llama-metal.tar.gz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/llama-metal"
+          tar -xzf "$RUNNER_TEMP/llama-metal.tar.gz" -C "$RUNNER_TEMP/llama-metal" ios/lib_llama_cpp_ios.xcframework
+          package_path=$(python3 - <<'PY'
+          import json
+          import urllib.parse
+          from pathlib import Path
+          config = json.loads(Path('.dart_tool/package_config.json').read_text())
+          uri = next(p['rootUri'] for p in config['packages'] if p['name'] == 'lib_llama_cpp_ios')
+          print(urllib.parse.unquote(urllib.parse.urlparse(uri).path))
+          PY
+          )
+          frameworks="$package_path/ios/lib_llama_cpp_ios/Frameworks"
+          test -d "$frameworks/lib_llama_cpp_ios.xcframework"
+          rm -rf "$frameworks/lib_llama_cpp_ios.xcframework"
+          cp -R "$RUNNER_TEMP/llama-metal/ios/lib_llama_cpp_ios.xcframework" "$frameworks/"
+          test -f "$frameworks/lib_llama_cpp_ios.xcframework/ios-arm64/lib_llama_cpp_ios.framework/lib_llama_cpp_ios"
       - name: Analyze and test
         working-directory: app
         run: |

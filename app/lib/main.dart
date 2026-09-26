@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'glass_design.dart';
+import 'inference_profile.dart';
 import 'color_picker.dart';
 import 'chat_context.dart';
 import 'fish_voice.dart';
@@ -22,6 +23,7 @@ import 'reply_quality.dart';
 import 'speech_download.dart';
 import 'video_duration.dart';
 import 'video_sampler.dart';
+import 'voice_turn_detector.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -241,6 +243,9 @@ class _ChatScreenState extends State<ChatScreen> {
   LlamaCancellationController? activeGeneration;
   int frameCount = 4;
   int maxTokens = 400;
+  InferenceProfile inferenceProfile = InferenceProfile.balanced;
+  bool routeTextToChatModel = true;
+  int callPauseMilliseconds = 1000;
   String themeName = 'Aurora';
   Color customColor = const Color(0xFF55C8FF);
   Color starColor = const Color(0xFFB6DCFF);
@@ -288,6 +293,20 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       for (final model in models) {
         if (model.vision) return model;
+      }
+    }
+    if (attachments.isEmpty &&
+        routeTextToChatModel &&
+        modelPath != autoModelPath) {
+      final chosen = models.where((item) => item.path == modelPath).firstOrNull;
+      if (chosen?.vision == true) {
+        final roleplay = models.where(
+          (item) =>
+              !item.vision && item.name.toLowerCase().contains('nymphaea'),
+        );
+        if (roleplay.isNotEmpty) return roleplay.first;
+        final textModels = models.where((item) => !item.vision);
+        if (textModels.isNotEmpty) return textModels.first;
       }
     }
     if (modelPath == autoModelPath) {
@@ -650,6 +669,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 .clamp(4, 12)
                 .toInt();
         maxTokens = data['maxTokens'] as int? ?? 400;
+        inferenceProfile = InferenceProfile.fromName(
+          data['inferenceProfile'] as String?,
+        );
+        routeTextToChatModel = data['routeTextToChatModel'] as bool? ?? true;
+        callPauseMilliseconds = (data['callPauseMilliseconds'] as int? ?? 1000)
+            .clamp(650, 1800);
         themeName = data['themeName'] as String? ?? 'Aurora';
         if (!GlassPalette.presets.containsKey(themeName)) themeName = 'Aurora';
         customColor = Color(data['customColor'] as int? ?? 0xFF55C8FF);
@@ -842,6 +867,9 @@ class _ChatScreenState extends State<ChatScreen> {
         'instructions': instructions,
         'frameCount': frameCount,
         'maxTokens': maxTokens,
+        'inferenceProfile': inferenceProfile.name,
+        'routeTextToChatModel': routeTextToChatModel,
+        'callPauseMilliseconds': callPauseMilliseconds,
         'themeName': themeName,
         'customColor': customColor.toARGB32(),
         'starColor': starColor.toARGB32(),
@@ -953,6 +981,31 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     await save();
     await deleteUnreferencedMedia(paths);
+  }
+
+  Future<void> revisitMedia(ChatEntry entry) async {
+    if (busy || callActive || entry.frames.isEmpty) return;
+    final present = <MediaFrame>[];
+    for (final frame in entry.frames) {
+      if (await File(frame.path).exists()) present.add(frame);
+    }
+    if (present.isEmpty) {
+      showProblem('The saved media is no longer available on this device.');
+      return;
+    }
+    setState(() {
+      attachments
+        ..clear()
+        ..addAll(present);
+      currentVideoPath = entry.videoPath;
+      currentVideoPlaybackPath = entry.playbackPath;
+      currentVideoDurationMs = null;
+      draft.text = entry.videoPath == null
+          ? 'Look again at this image and describe only what is visible.'
+          : 'Look again at this video and describe the visible action.';
+    });
+    await save();
+    showProblem('Media ready. Edit the question or send it again.');
   }
 
   Future<void> deleteUnreferencedMedia(List<String> paths) async {
@@ -1556,6 +1609,9 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     final cancellation = LlamaCancellationController();
     activeGeneration = cancellation;
+    final generationWatch = Stopwatch()..start();
+    Duration? firstWordAt;
+    final preparedInferenceFiles = <String>[];
     try {
       await save();
       final input = <LlamaResponseInputItem>[];
@@ -1593,7 +1649,7 @@ class _ChatScreenState extends State<ChatScreen> {
       } else if (inferenceFrames.isNotEmpty) {
         parts.add(
           const LlamaTextPart(
-            'Use only these attached images as visual evidence. State the main visible actions and any visible nudity plainly. Do not guess body parts that are covered, too small to see, or inside the body. Do not make a repetitive body-part list.',
+            'Use only these attached images as visual evidence. Describe the main visible action directly in one or two sentences. Name clearly visible adult nudity or sexual activity plainly when present. Do not guess covered or unseen anatomy, invent context, or make a body-part list.',
           ),
         );
       }
@@ -1607,7 +1663,21 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           );
         }
-        parts.add(LlamaImageFilePart(path: frame.path));
+        var inferencePath = frame.path;
+        if (Platform.isIOS && inferenceProfile.imageSide < 1024) {
+          final resized =
+              '${frame.path}.inference_${inferenceProfile.imageSide}.jpg';
+          inferencePath =
+              await const MethodChannel('local_ai_chat/media')
+                  .invokeMethod<String>('prepareImage', {
+                    'source': frame.path,
+                    'destination': resized,
+                    'maxSide': inferenceProfile.imageSide.toString(),
+                  }) ??
+              (throw StateError('Could not prepare image for inference.'));
+          preparedInferenceFiles.add(inferencePath);
+        }
+        parts.add(LlamaImageFilePart(path: inferencePath));
       }
       input.add(LlamaResponseInputItem(role: 'user', content: parts));
       final client = LlamaOpenAIClient(
@@ -1616,8 +1686,11 @@ class _ChatScreenState extends State<ChatScreen> {
           'active': LlamaModelConfig(
             modelPath: model.path,
             mmprojPath: model.projector,
-            contextSize: model.vision ? 4096 : 2048,
-            gpuLayerCount: 0,
+            contextSize: model.vision && isVideo
+                ? 4096
+                : inferenceProfile.contextSize,
+            gpuLayerCount: Platform.isIOS ? inferenceProfile.iosGpuLayers : 0,
+            mmprojUseGpu: Platform.isIOS && model.vision,
           ),
         },
       );
@@ -1635,14 +1708,17 @@ class _ChatScreenState extends State<ChatScreen> {
               memory: chat.memory,
             ) +
             (model.name.toLowerCase().contains('qwen3') ? '\n/no_think' : ''),
-        maxOutputTokens: model.vision && inferenceFrames.isNotEmpty
-            ? maxTokens.clamp(80, isVideo ? 160 : 260)
-            : maxTokens,
+        maxOutputTokens: inferenceProfile.outputTokens(
+          maxTokens,
+          hasMedia: inferenceFrames.isNotEmpty,
+          video: isVideo,
+        ),
         temperature: 0.65,
         topP: 0.90,
       )) {
         if (cancelled) break;
         if (event is LlamaResponseOutputTextDelta) {
+          firstWordAt ??= generationWatch.elapsed;
           rawReply += event.delta;
           final visible = visibleReply(rawReply);
           final repeatedFrom = repetitiveSentenceRunStart(visible);
@@ -1729,7 +1805,8 @@ class _ChatScreenState extends State<ChatScreen> {
               ? 'Stopped'
               : stoppedForLoop
               ? 'Stopped a repetitive reply.'
-              : 'Ready',
+              : 'Ready · ${generationWatch.elapsed.inSeconds}s'
+                    '${firstWordAt == null ? '' : ' · first word ${firstWordAt.inSeconds}s'}',
         );
       }
       if (!cancelled &&
@@ -1777,6 +1854,10 @@ class _ChatScreenState extends State<ChatScreen> {
           : 'Local generation failed: $error';
       showProblem(message);
     } finally {
+      for (final path in preparedInferenceFiles) {
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+      }
       if (identical(activeGeneration, cancellation)) activeGeneration = null;
       if (mounted) setState(() => busy = false);
       await save();
@@ -1903,28 +1984,25 @@ class _ChatScreenState extends State<ChatScreen> {
         continue;
       }
       try {
-        callStatus.value = 'Listening…';
+        callStatus.value = 'Listening · sends after a pause';
         final path =
             '${recordings.path}${Platform.pathSeparator}call_${DateTime.now().microsecondsSinceEpoch}.wav';
         await service.startRecording(path);
         final started = DateTime.now();
-        DateTime? lastVoice;
-        var voiceHits = 0;
+        final detector = VoiceTurnDetector(
+          pauseMilliseconds: callPauseMilliseconds,
+        );
         while (callActive && epoch == callEpoch && !callMuted) {
-          await Future.delayed(const Duration(milliseconds: 200));
+          await Future.delayed(const Duration(milliseconds: 120));
           final level = await service.microphoneLevel();
-          if (level > -37) {
-            voiceHits++;
-            lastVoice = DateTime.now();
-          }
           final elapsed = DateTime.now().difference(started);
+          final finished = detector.add(level, elapsed.inMilliseconds);
+          if (detector.hasSpeech)
+            callStatus.value = 'Listening · pause to send';
           if (callSendNow ||
               elapsed > const Duration(seconds: 30) ||
-              (voiceHits >= 2 &&
-                  lastVoice != null &&
-                  DateTime.now().difference(lastVoice) >
-                      const Duration(milliseconds: 1200)) ||
-              (voiceHits == 0 && elapsed > const Duration(seconds: 9)))
+              finished ||
+              (!detector.hasSpeech && elapsed > const Duration(seconds: 9)))
             break;
         }
         final manuallySent = callSendNow;
@@ -1932,7 +2010,7 @@ class _ChatScreenState extends State<ChatScreen> {
         if (!callActive ||
             epoch != callEpoch ||
             callMuted ||
-            (voiceHits < 2 && !manuallySent)) {
+            (!detector.hasSpeech && !manuallySent)) {
           if (service.recording) await service.stopRecording();
           continue;
         }
@@ -2301,6 +2379,9 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     var count = frameCount;
     var limit = maxTokens;
+    var profile = inferenceProfile;
+    var autoTextRouting = routeTextToChatModel;
+    var pauseMilliseconds = callPauseMilliseconds;
     var selectedTheme = themeName;
     var selectedStyle = backgroundStyle;
     var animated = motion;
@@ -2327,6 +2408,32 @@ class _ChatScreenState extends State<ChatScreen> {
                   ExpansionTile(
                     title: const Text('Chat and video'),
                     children: [
+                      DropdownButtonFormField<InferenceProfile>(
+                        initialValue: profile,
+                        decoration: const InputDecoration(
+                          labelText: 'Response speed and detail',
+                        ),
+                        items: InferenceProfile.values
+                            .map(
+                              (item) => DropdownMenuItem(
+                                value: item,
+                                child: Text(item.label),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) =>
+                            update(() => profile = value ?? profile),
+                      ),
+                      Text(profile.description),
+                      SwitchListTile(
+                        title: const Text('Use a chat model for text'),
+                        subtitle: const Text(
+                          'Keeps the vision model for photos and videos; uses an installed chat model for text and roleplay.',
+                        ),
+                        value: autoTextRouting,
+                        onChanged: (value) =>
+                            update(() => autoTextRouting = value),
+                      ),
                       TextField(
                         controller: promptController,
                         maxLines: 3,
@@ -2679,6 +2786,29 @@ class _ChatScreenState extends State<ChatScreen> {
                   ExpansionTile(
                     title: const Text('Voice'),
                     children: [
+                      DropdownButtonFormField<int>(
+                        initialValue: pauseMilliseconds,
+                        decoration: const InputDecoration(
+                          labelText: 'Call sends after silence',
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 700,
+                            child: Text('0.7 seconds · quick'),
+                          ),
+                          DropdownMenuItem(
+                            value: 1000,
+                            child: Text('1 second · natural'),
+                          ),
+                          DropdownMenuItem(
+                            value: 1600,
+                            child: Text('1.6 seconds · patient'),
+                          ),
+                        ],
+                        onChanged: (value) => update(
+                          () => pauseMilliseconds = value ?? pauseMilliseconds,
+                        ),
+                      ),
                       DropdownButtonFormField<String>(
                         initialValue: source,
                         decoration: const InputDecoration(
@@ -2869,6 +2999,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 instructions = promptController.text;
                 frameCount = count;
                 maxTokens = limit;
+                inferenceProfile = profile;
+                routeTextToChatModel = autoTextRouting;
+                callPauseMilliseconds = pauseMilliseconds;
                 setState(() {
                   themeName = selectedTheme;
                   customColor = selectedCustom;
@@ -3003,10 +3136,19 @@ class _ChatScreenState extends State<ChatScreen> {
                     if (value == 'delete') unawaited(deleteMessage(entry));
                     if (value == 'copy')
                       Clipboard.setData(ClipboardData(text: entry.text));
+                    if (value == 'revisit') unawaited(revisitMedia(entry));
                   },
-                  itemBuilder: (context) => const [
-                    PopupMenuItem(value: 'copy', child: Text('Copy text')),
-                    PopupMenuItem(
+                  itemBuilder: (context) => [
+                    const PopupMenuItem(
+                      value: 'copy',
+                      child: Text('Copy text'),
+                    ),
+                    if (entry.frames.isNotEmpty)
+                      const PopupMenuItem(
+                        value: 'revisit',
+                        child: Text('Ask about this media again'),
+                      ),
+                    const PopupMenuItem(
                       value: 'delete',
                       child: Text('Delete message'),
                     ),
@@ -3209,6 +3351,29 @@ class _ChatScreenState extends State<ChatScreen> {
                             style: Theme.of(context).textTheme.bodySmall,
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        PopupMenuButton<InferenceProfile>(
+                          tooltip: 'Response speed',
+                          enabled: !busy,
+                          initialValue: inferenceProfile,
+                          onSelected: (value) {
+                            setState(() => inferenceProfile = value);
+                            unawaited(save());
+                          },
+                          itemBuilder: (context) => InferenceProfile.values
+                              .map(
+                                (item) => PopupMenuItem(
+                                  value: item,
+                                  child: Text(
+                                    '${item.label} · ${item.description}',
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Text('${inferenceProfile.label} ▾'),
                           ),
                         ),
                         if (downloadingSpeech)

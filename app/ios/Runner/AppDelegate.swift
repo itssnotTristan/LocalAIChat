@@ -29,7 +29,9 @@ import UIKit
         return
       }
       let longestSide = max(image.size.width, image.size.height)
-      let scale = min(1.0, 1024.0 / max(longestSide, 1.0))
+      let requestedSide = Double(arguments["maxSide"] ?? "") ?? 1024.0
+      let maxSide = min(1536.0, max(320.0, requestedSide))
+      let scale = min(1.0, maxSide / max(longestSide, 1.0))
       let target = CGSize(width: max(1, image.size.width * scale),
                           height: max(1, image.size.height * scale))
       let format = UIGraphicsImageRendererFormat()
