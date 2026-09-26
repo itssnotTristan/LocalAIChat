@@ -11,6 +11,7 @@ import 'image_studio_engine.dart';
 import 'image_edit_request.dart';
 import 'image_studio_install.dart';
 import 'image_studio_models.dart';
+import 'background_model_download.dart';
 
 class ImageStudioPage extends StatefulWidget {
   const ImageStudioPage({required this.root, required this.design, super.key});
@@ -27,6 +28,11 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
   late final ImageStudioEngine engine = ImageStudioEngine(root: widget.root);
   late final ImageStudioInstaller installer = ImageStudioInstaller(widget.root);
   late final ImageStudioModels modelStore = ImageStudioModels(widget.root);
+  final BackgroundModelDownloads backgroundDownloads =
+      BackgroundModelDownloads();
+  Timer? imageDownloadPoll;
+  bool imageArchiveReady = false;
+  String imageDownloadStatus = '';
   List<InstalledImageModel> models = [];
   String? selectedModelId;
   String? source;
@@ -42,6 +48,50 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
   void initState() {
     super.initState();
     refreshModels();
+    if (Platform.isIOS) {
+      unawaited(pollImageDownload());
+      imageDownloadPoll = Timer.periodic(
+        const Duration(seconds: 4),
+        (_) => unawaited(pollImageDownload()),
+      );
+    }
+  }
+
+  Future<void> pollImageDownload() async {
+    try {
+      final transfers = await backgroundDownloads.statuses();
+      final matching = transfers
+          .where(
+            (item) => item.id == BackgroundModelDownloads.imageArchiveTaskId,
+          )
+          .firstOrNull;
+      if (!mounted) return;
+      setState(() {
+        imageArchiveReady = matching?.state == 'downloaded';
+        imageDownloadStatus = switch (matching?.state) {
+          'downloading' =>
+            'Image model downloading in background · ${(matching!.received / 1048576).round()} MiB',
+          'downloaded' => 'Image model downloaded. Tap Finish install.',
+          'failed' => 'Image download failed: ${matching!.error}',
+          _ => '',
+        };
+      });
+    } catch (_) {
+      // The model picker still works if a background status check fails.
+    }
+  }
+
+  Future<void> queueImageDownload() async {
+    try {
+      await backgroundDownloads.queueImageArchive(widget.root);
+      await pollImageDownload();
+      if (mounted)
+        setState(
+          () => status = 'Image model download started. You can leave the app.',
+        );
+    } catch (error) {
+      if (mounted) setState(() => status = 'Image download failed: $error');
+    }
   }
 
   Future<void> refreshModels() async {
@@ -57,6 +107,7 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
 
   @override
   void dispose() {
+    imageDownloadPoll?.cancel();
     engine.cancel();
     installer.cancel();
     prompt.dispose();
@@ -113,6 +164,16 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       });
       await modelStore.select(ImageStudioModels.builtInId);
       await refreshModels();
+      if (Platform.isIOS) {
+        await backgroundDownloads.forgetId(
+          BackgroundModelDownloads.imageArchiveTaskId,
+        );
+        if (mounted)
+          setState(() {
+            imageArchiveReady = false;
+            imageDownloadStatus = '';
+          });
+      }
       if (mounted) setState(() => status = 'Image model ready on this device.');
     } catch (error) {
       if (mounted) setState(() => status = 'Install paused: $error');
@@ -376,18 +437,32 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
                         ),
                         const SizedBox(height: 8),
                         Text(status),
+                        if (imageDownloadStatus.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Text(imageDownloadStatus),
+                        ],
                         const SizedBox(height: 12),
                         Wrap(
                           spacing: 8,
                           runSpacing: 8,
                           children: [
                             OutlinedButton.icon(
-                              onPressed: installing ? null : installModel,
+                              onPressed: installing
+                                  ? null
+                                  : Platform.isIOS &&
+                                        !imageArchiveReady &&
+                                        !models.any((model) => model.isBuiltIn)
+                                  ? queueImageDownload
+                                  : installModel,
                               icon: const Icon(Icons.download_outlined),
                               label: Text(
                                 installing
                                     ? 'Installing…'
-                                    : 'Install Realistic Vision model',
+                                    : imageArchiveReady
+                                    ? 'Finish image model install'
+                                    : models.any((model) => model.isBuiltIn)
+                                    ? 'Check Realistic Vision model'
+                                    : 'Download image model in background',
                               ),
                             ),
                             OutlinedButton.icon(

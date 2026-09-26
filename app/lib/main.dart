@@ -26,6 +26,8 @@ import 'offline_library.dart';
 import 'offline_library_page.dart';
 import 'model_routing.dart';
 import 'model_download.dart';
+import 'background_model_download.dart';
+import 'uncensored_access.dart';
 import 'reply_quality.dart';
 import 'sensitive_context.dart';
 import 'speech_download.dart';
@@ -256,7 +258,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   static const autoModelPath = '__auto__';
   static const defaultInstructions =
       'You are a private local assistant. Answer the latest user message directly and naturally. Do not simply repeat the user’s words. Treat a user correction as newer information. Only claim to see images or video when media is attached to this message.';
@@ -303,6 +305,13 @@ class _ChatScreenState extends State<ChatScreen> {
   bool callSendNow = false;
   int voiceEpoch = 0;
   final ModelDownloader downloader = ModelDownloader();
+  final BackgroundModelDownloads backgroundDownloads =
+      BackgroundModelDownloads();
+  final ValueNotifier<List<BackgroundTransferStatus>> backgroundTransfers =
+      ValueNotifier(const []);
+  Timer? backgroundPoll;
+  bool syncingBackgroundDownloads = false;
+  bool uncensoredUnlocked = false;
   bool downloading = false;
   final SpeechDownloader speechDownloader = SpeechDownloader();
   bool downloadingSpeech = false;
@@ -314,17 +323,24 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Conversation get chat => chats.firstWhere((item) => item.id == chatId);
   LocalModel? get selectedModel {
+    final available = models
+        .where(
+          (model) =>
+              uncensoredUnlocked ||
+              !isUncensoredModelName('${model.name} ${model.path}'),
+        )
+        .toList();
     if (attachments.isNotEmpty) {
       for (final model in models) {
         if (model.path == modelPath && model.vision) return model;
       }
-      for (final model in models) {
+      for (final model in available) {
         if (model.vision && model.name.contains('Qwen3 VL')) return model;
       }
-      for (final model in models) {
+      for (final model in available) {
         if (model.vision && model.name.contains('Qwen3.5')) return model;
       }
-      for (final model in models) {
+      for (final model in available) {
         if (model.vision) return model;
       }
     }
@@ -333,7 +349,7 @@ class _ChatScreenState extends State<ChatScreen> {
         modelPath != autoModelPath) {
       final chosen = models.where((item) => item.path == modelPath).firstOrNull;
       if (chosen?.vision == true) {
-        final everyday = models.where(
+        final everyday = available.where(
           (item) => !item.vision && item.name.contains('Ministral'),
         );
         if (everyday.isNotEmpty) return everyday.first;
@@ -343,53 +359,53 @@ class _ChatScreenState extends State<ChatScreen> {
             chosen.name.contains('Qwen3.5')) {
           return chosen;
         }
-        for (final model in models) {
+        for (final model in available) {
           if (model.vision && model.name.contains('Qwen3 VL')) return model;
         }
-        for (final model in models) {
+        for (final model in available) {
           if (model.vision && model.name.contains('Qwen3.5')) return model;
         }
-        final roleplay = models.where(
+        final roleplay = available.where(
           (item) =>
               !item.vision && item.name.toLowerCase().contains('nymphaea'),
         );
         if (roleplay.isNotEmpty) return roleplay.first;
-        final textModels = models.where((item) => !item.vision);
+        final textModels = available.where((item) => !item.vision);
         if (textModels.isNotEmpty) return textModels.first;
       }
     }
     if (modelPath == autoModelPath) {
       if (attachments.isNotEmpty) {
-        for (final model in models) {
+        for (final model in available) {
           if (model.vision && model.name.contains('Qwen3 VL')) return model;
         }
-        for (final model in models) {
+        for (final model in available) {
           if (model.vision && model.name.contains('Qwen3.5')) return model;
         }
-        for (final model in models) {
+        for (final model in available) {
           if (model.vision) return model;
         }
       } else {
-        for (final model in models) {
+        for (final model in available) {
           if (!model.vision && model.name.contains('Ministral')) return model;
         }
-        for (final model in models) {
+        for (final model in available) {
           if (model.vision && model.name.contains('Qwen3 VL')) return model;
         }
-        for (final model in models) {
+        for (final model in available) {
           if (model.vision && model.name.contains('Qwen3.5')) return model;
         }
-        for (final model in models) {
+        for (final model in available) {
           if (!model.vision && model.name.contains('Nymphaea')) return model;
         }
-        for (final model in models) {
+        for (final model in available) {
           if (!model.vision && model.name.contains('Qwen2.5')) return model;
         }
-        for (final model in models) {
+        for (final model in available) {
           if (!model.vision) return model;
         }
       }
-      return models.isEmpty ? null : models.first;
+      return available.isEmpty ? null : available.first;
     }
     for (final model in models) {
       if (model.path == modelPath) return model;
@@ -408,11 +424,22 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(load());
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(syncBackgroundDownloads());
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    backgroundPoll?.cancel();
+    backgroundTransfers.dispose();
     callEpoch++;
     callStatus.dispose();
     draft.dispose();
@@ -422,7 +449,158 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
+  Future<void> queueBackgroundPack(String id) async {
+    final root = dataDir?.path;
+    if (root == null) return;
+    final pack = BackgroundModelPack.byId(id);
+    try {
+      await backgroundDownloads.queue(root, pack);
+      if (mounted) {
+        setState(
+          () => status = '${pack.name} is downloading in the background.',
+        );
+      }
+      await syncBackgroundDownloads();
+    } catch (error) {
+      if (mounted) showProblem('Could not queue ${pack.name}: $error');
+    }
+  }
+
+  Future<void> showUncensoredAccess() async {
+    var enteredCode = '';
+    var error = '';
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, update) => SafeArea(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              20,
+              20,
+              MediaQuery.viewInsetsOf(sheetContext).bottom + 20,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Uncensored Mode',
+                    style: Theme.of(sheetContext).textTheme.headlineSmall,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    uncensoredUnlocked
+                        ? 'Owner preview is active on this device.'
+                        : 'Enter your owner code to unlock uncensored chat models and adult conversations in this sideloaded preview.',
+                  ),
+                  const SizedBox(height: 14),
+                  const ListTile(
+                    title: Text('Monthly · \$5'),
+                    subtitle: Text('Planned price · billing is not active'),
+                  ),
+                  const ListTile(
+                    title: Text('Yearly · \$15'),
+                    subtitle: Text('Planned price · billing is not active'),
+                  ),
+                  if (!uncensoredUnlocked) ...[
+                    TextField(
+                      obscureText: true,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: const InputDecoration(
+                        labelText: 'Owner code',
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (value) => enteredCode = value,
+                    ),
+                    if (error.isNotEmpty) Text(error),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      onPressed: () async {
+                        final valid = await UncensoredAccess.unlock(
+                          enteredCode,
+                        );
+                        if (!sheetContext.mounted) return;
+                        if (!valid) {
+                          update(
+                            () => error = 'That owner code did not match.',
+                          );
+                          return;
+                        }
+                        if (mounted) setState(() => uncensoredUnlocked = true);
+                        Navigator.pop(sheetContext);
+                      },
+                      child: const Text('Unlock free owner preview'),
+                    ),
+                  ] else
+                    TextButton(
+                      onPressed: () async {
+                        await UncensoredAccess.lock();
+                        if (mounted) setState(() => uncensoredUnlocked = false);
+                        if (sheetContext.mounted) Navigator.pop(sheetContext);
+                      },
+                      child: const Text('Lock Uncensored Mode'),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> syncBackgroundDownloads() async {
+    final root = dataDir?.path;
+    if (!Platform.isIOS || root == null || syncingBackgroundDownloads) return;
+    syncingBackgroundDownloads = true;
+    try {
+      final states = await backgroundDownloads.statuses();
+      if (mounted) backgroundTransfers.value = states;
+      final ready = await backgroundDownloads.finalize(root, states);
+      for (final pack in ready) {
+        final path = '$root/models/${pack.modelName}';
+        if (!models.any((item) => item.path == path)) {
+          models.add(
+            LocalModel(
+              pack.name,
+              path,
+              pack.projectorName == null
+                  ? null
+                  : '$root/models/${pack.projectorName}',
+            ),
+          );
+        }
+        if (pack.id == 'everyday') {
+          final oldText = File('$root/models/${ModelDownloader.adultTextName}');
+          if (await oldText.exists()) {
+            await oldText.delete();
+            models.removeWhere((item) => item.path == oldText.path);
+          }
+        }
+        if (modelPath == null || modelPath == autoModelPath) {
+          modelPath = autoModelPath;
+        }
+        await save();
+        await backgroundDownloads.forget(pack);
+        if (mounted)
+          setState(() => status = '${pack.name} is ready on this iPhone.');
+      }
+      if (ready.isNotEmpty && mounted) {
+        backgroundTransfers.value = await backgroundDownloads.statuses();
+      }
+    } catch (error) {
+      if (mounted) setState(() => status = 'Background model check: $error');
+    } finally {
+      syncingBackgroundDownloads = false;
+    }
+  }
+
   Future<void> downloadStarterModel() async {
+    if (Platform.isIOS) return queueBackgroundPack('starter');
     if (downloading || dataDir == null) return;
     final directory = dataDir!.path + Platform.pathSeparator + 'models';
     setState(() {
@@ -466,6 +644,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> downloadEverydayModel() async {
+    if (Platform.isIOS) return queueBackgroundPack('everyday');
     if (downloading || dataDir == null) return;
     final directory = '${dataDir!.path}${Platform.pathSeparator}models';
     setState(() {
@@ -519,6 +698,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> downloadDetailedVisionModel() async {
+    if (!uncensoredUnlocked) {
+      await showUncensoredAccess();
+      if (!uncensoredUnlocked) return;
+    }
+    if (Platform.isIOS) return queueBackgroundPack('detailed');
     if (downloading || dataDir == null) return;
     final directory = dataDir!.path + Platform.pathSeparator + 'models';
     setState(() {
@@ -564,6 +748,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> downloadRoleplayModel() async {
+    if (!uncensoredUnlocked) {
+      await showUncensoredAccess();
+      if (!uncensoredUnlocked) return;
+    }
+    if (Platform.isIOS) return queueBackgroundPack('roleplay');
     if (downloading || dataDir == null) return;
     final directory = dataDir!.path + Platform.pathSeparator + 'models';
     setState(() {
@@ -600,6 +789,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> downloadAdultVisionModel() async {
+    if (!uncensoredUnlocked) {
+      await showUncensoredAccess();
+      if (!uncensoredUnlocked) return;
+    }
+    if (Platform.isIOS) return queueBackgroundPack('adult-vision');
     if (downloading || dataDir == null) return;
     final directory = '${dataDir!.path}${Platform.pathSeparator}models';
     setState(() {
@@ -909,6 +1103,11 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       speech = SpeechService(speechRoot!);
       try {
+        uncensoredUnlocked = await UncensoredAccess.isUnlocked;
+      } catch (_) {
+        uncensoredUnlocked = false;
+      }
+      try {
         fishHasKey = await FishVoice.hasKey;
       } catch (_) {
         fishHasKey = false;
@@ -921,6 +1120,13 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
       await save();
+      if (Platform.isIOS) {
+        await syncBackgroundDownloads();
+        backgroundPoll ??= Timer.periodic(
+          const Duration(seconds: 4),
+          (_) => unawaited(syncBackgroundDownloads()),
+        );
+      }
     } catch (error) {
       if (mounted)
         setState(
@@ -1603,6 +1809,13 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     final prompt = draft.text.trim();
+    if (!uncensoredUnlocked && isExplicitAdultTopic(prompt)) {
+      showProblem(
+        'This adult topic requires Uncensored Mode. Your draft is saved.',
+      );
+      await showUncensoredAccess();
+      return;
+    }
     final lastMediaIndex = chat.entries.lastIndexWhere(
       (entry) => entry.role == 'user' && entry.frames.isNotEmpty,
     );
@@ -1675,6 +1888,12 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         );
       }
+    }
+    if (!uncensoredUnlocked &&
+        isUncensoredModelName('${model.name} ${model.path}')) {
+      showProblem('This model requires Uncensored Mode. Your draft is saved.');
+      await showUncensoredAccess();
+      return;
     }
     if (!await File(model.path).exists()) {
       showProblem('The selected model file is missing: ${model.path}');
@@ -2528,6 +2747,22 @@ class _ChatScreenState extends State<ChatScreen> {
                         label: const Text('Import model'),
                       ),
                       OutlinedButton.icon(
+                        onPressed: () async {
+                          await showUncensoredAccess();
+                          update(() {});
+                        },
+                        icon: Icon(
+                          uncensoredUnlocked
+                              ? Icons.lock_open_outlined
+                              : Icons.lock_outline,
+                        ),
+                        label: Text(
+                          uncensoredUnlocked
+                              ? 'Uncensored Mode · owner preview'
+                              : 'Unlock Uncensored Mode',
+                        ),
+                      ),
+                      OutlinedButton.icon(
                         onPressed:
                             selectedModel == null || modelPath == autoModelPath
                             ? null
@@ -2598,6 +2833,58 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                     ],
                   ),
+                  if (Platform.isIOS) ...[
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Downloads continue while this app is in the background. Open it again to verify and install finished models.',
+                    ),
+                    ValueListenableBuilder<List<BackgroundTransferStatus>>(
+                      valueListenable: backgroundTransfers,
+                      builder: (context, transfers, _) => Column(
+                        children: transfers.map((transfer) {
+                          final known = transfer.expected > 0;
+                          final progress = known
+                              ? (transfer.received / transfer.expected).clamp(
+                                  0.0,
+                                  1.0,
+                                )
+                              : null;
+                          return ListTile(
+                            dense: true,
+                            title: Text(
+                              transfer.id.replaceFirst(RegExp(r'^[^-]+-'), ''),
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  transfer.state == 'downloading'
+                                      ? '${(transfer.received / 1048576).round()} MiB downloaded'
+                                      : transfer.state == 'downloaded'
+                                      ? 'Downloaded · checking checksum when open'
+                                      : '${transfer.state}${transfer.error.isEmpty ? '' : ': ${transfer.error}'}',
+                                ),
+                                if (transfer.state == 'downloading')
+                                  LinearProgressIndicator(value: progress),
+                              ],
+                            ),
+                            trailing: transfer.state == 'downloading'
+                                ? IconButton(
+                                    tooltip: 'Cancel download',
+                                    icon: const Icon(Icons.close),
+                                    onPressed: () async {
+                                      await backgroundDownloads.cancel(
+                                        transfer.id,
+                                      );
+                                      await syncBackgroundDownloads();
+                                    },
+                                  )
+                                : null,
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ],
                   Expanded(
                     child: ListView(
                       children: [
@@ -2655,7 +2942,14 @@ class _ChatScreenState extends State<ChatScreen> {
                             ),
                             value: model.path,
                             groupValue: modelPath,
-                            onChanged: (value) {
+                            onChanged: (value) async {
+                              if (!uncensoredUnlocked &&
+                                  isUncensoredModelName(
+                                    '${model.name} ${model.path}',
+                                  )) {
+                                await showUncensoredAccess();
+                                if (!uncensoredUnlocked) return;
+                              }
                               setState(() => modelPath = value);
                               update(() {});
                               unawaited(save());

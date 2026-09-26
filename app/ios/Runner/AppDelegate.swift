@@ -2,6 +2,192 @@ import Flutter
 import UIKit
 import AVFoundation
 
+private struct ModelTransferRecord: Codable {
+  var id: String
+  var url: String
+  var destination: String
+  var state: String
+  var received: Int64
+  var expected: Int64
+  var error: String?
+
+  var dictionary: [String: Any] {
+    ["id": id, "state": state, "received": received,
+     "expected": expected, "error": error ?? ""]
+  }
+}
+
+/// iOS owns these transfers so they can continue while Flutter is suspended.
+final class ModelTransferBridge: NSObject, URLSessionDownloadDelegate {
+  static let sessionIdentifier = "com.localai.localAiChat.modelTransfers"
+  private let storageKey = "modelTransferRecordsV1"
+  private var records = [String: ModelTransferRecord]()
+  private var backgroundCompletion: (() -> Void)?
+  private lazy var session: URLSession = {
+    let configuration = URLSessionConfiguration.background(
+      withIdentifier: Self.sessionIdentifier)
+    configuration.sessionSendsLaunchEvents = true
+    configuration.isDiscretionary = false
+    return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+  }()
+
+  override init() {
+    super.init()
+    if let data = UserDefaults.standard.data(forKey: storageKey),
+       let saved = try? JSONDecoder().decode([String: ModelTransferRecord].self, from: data) {
+      records = saved
+    }
+    _ = session
+  }
+
+  func setBackgroundCompletion(_ completion: @escaping () -> Void) {
+    synchronized { backgroundCompletion = completion }
+  }
+
+  func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    switch call.method {
+    case "start":
+      guard let args = call.arguments as? [String: Any],
+            let id = args["id"] as? String,
+            let source = args["url"] as? String,
+            let url = URL(string: source), url.scheme == "https",
+            let destination = args["destination"] as? String,
+            id.range(of: "^[A-Za-z0-9._-]{1,160}$", options: .regularExpression) != nil,
+            destination.hasSuffix(".part") else {
+        result(FlutterError(code: "download_input", message: "Invalid model download.", details: nil))
+        return
+      }
+      let root = FileManager.default.urls(for: .applicationSupportDirectory,
+                                           in: .userDomainMask).first!.standardizedFileURL.path
+      let target = URL(fileURLWithPath: destination).standardizedFileURL.path
+      guard target.hasPrefix(root + "/") else {
+        result(FlutterError(code: "download_path", message: "Model must be saved in the app.", details: nil))
+        return
+      }
+      let alreadyStarted = synchronized { () -> Bool in
+        if let existing = records[id],
+           existing.state == "downloading" || existing.state == "downloaded" {
+          return true
+        }
+        records[id] = ModelTransferRecord(id: id, url: source,
+          destination: target, state: "downloading", received: 0,
+          expected: (args["expected"] as? NSNumber)?.int64Value ?? 0,
+          error: nil)
+        persist()
+        return false
+      }
+      if !alreadyStarted {
+        let task = session.downloadTask(with: url)
+        task.taskDescription = id
+        task.resume()
+      }
+      result(nil)
+    case "list":
+      session.getAllTasks { [weak self] tasks in
+        guard let self else { return }
+        let values = self.synchronized { () -> [[String: Any]] in
+          self.records.values.sorted { $0.id < $1.id }.map { record in
+            var value = record.dictionary
+            if let task = tasks.first(where: { $0.taskDescription == record.id }),
+               record.state == "downloading" {
+              value["received"] = max(0, task.countOfBytesReceived)
+              if task.countOfBytesExpectedToReceive > 0 {
+                value["expected"] = task.countOfBytesExpectedToReceive
+              }
+            }
+            return value
+          }
+        }
+        DispatchQueue.main.async { result(values) }
+      }
+    case "cancel":
+      guard let id = (call.arguments as? [String: Any])?["id"] as? String else {
+        result(FlutterError(code: "download_input", message: "Missing download ID.", details: nil))
+        return
+      }
+      session.getAllTasks { [weak self] tasks in
+        tasks.filter { $0.taskDescription == id }.forEach { $0.cancel() }
+        self?.update(id) { $0.state = "cancelled" }
+        DispatchQueue.main.async { result(nil) }
+      }
+    case "forget":
+      guard let id = (call.arguments as? [String: Any])?["id"] as? String else {
+        result(FlutterError(code: "download_input", message: "Missing download ID.", details: nil))
+        return
+      }
+      synchronized { records.removeValue(forKey: id); persist() }
+      result(nil)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                  didFinishDownloadingTo location: URL) {
+    guard let id = downloadTask.taskDescription else { return }
+    guard let response = downloadTask.response as? HTTPURLResponse,
+          (200...299).contains(response.statusCode) else {
+      update(id) { $0.state = "failed"; $0.error = "Server rejected the download." }
+      return
+    }
+    guard let destination = synchronized({ records[id]?.destination }) else { return }
+    do {
+      let target = URL(fileURLWithPath: destination)
+      try FileManager.default.createDirectory(at: target.deletingLastPathComponent(),
+                                              withIntermediateDirectories: true)
+      if FileManager.default.fileExists(atPath: target.path) {
+        try FileManager.default.removeItem(at: target)
+      }
+      try FileManager.default.moveItem(at: location, to: target)
+      let bytes = (try FileManager.default.attributesOfItem(atPath: target.path)[.size] as? NSNumber)?.int64Value ?? 0
+      update(id) { $0.state = "downloaded"; $0.received = bytes; $0.error = nil }
+    } catch {
+      update(id) { $0.state = "failed"; $0.error = error.localizedDescription }
+    }
+  }
+
+  func urlSession(_ session: URLSession, task: URLSessionTask,
+                  didCompleteWithError error: Error?) {
+    guard let id = task.taskDescription, let error else { return }
+    update(id) {
+      if $0.state != "downloaded" && $0.state != "cancelled" {
+        $0.state = "failed"
+        $0.error = error.localizedDescription
+      }
+    }
+  }
+
+  func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+    let completion = synchronized { () -> (() -> Void)? in
+      let pending = backgroundCompletion
+      backgroundCompletion = nil
+      return pending
+    }
+    if let completion { DispatchQueue.main.async(execute: completion) }
+  }
+
+  private func update(_ id: String, change: (inout ModelTransferRecord) -> Void) {
+    synchronized {
+      guard var record = records[id] else { return }
+      change(&record)
+      records[id] = record
+      persist()
+    }
+  }
+
+  private func persist() {
+    guard let data = try? JSONEncoder().encode(records) else { return }
+    UserDefaults.standard.set(data, forKey: storageKey)
+  }
+
+  private let lock = NSRecursiveLock()
+  private func synchronized<T>(_ work: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return work()
+  }
+}
+
 // When the larger Kokoro model cannot allocate on iPhone, use an installed
 // iOS voice so an otherwise successful chat reply still speaks out loud.
 final class SystemSpeechBridge: NSObject, AVSpeechSynthesizerDelegate {
@@ -80,6 +266,17 @@ final class SystemSpeechBridge: NSObject, AVSpeechSynthesizerDelegate {
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  private let modelTransfers = ModelTransferBridge()
+
+  override func application(_ application: UIApplication,
+                            handleEventsForBackgroundURLSession identifier: String,
+                            completionHandler: @escaping () -> Void) {
+    if identifier == ModelTransferBridge.sessionIdentifier {
+      modelTransfers.setBackgroundCompletion(completionHandler)
+    } else {
+      completionHandler()
+    }
+  }
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -104,6 +301,13 @@ final class SystemSpeechBridge: NSObject, AVSpeechSynthesizerDelegate {
     )
     imageStudioChannel.setMethodCallHandler { call, result in
       imageStudioBridge.handle(call, result: result)
+    }
+    let transferChannel = FlutterMethodChannel(
+      name: "local_ai_chat/model_transfers",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    transferChannel.setMethodCallHandler { [modelTransfers = self.modelTransfers] call, result in
+      modelTransfers.handle(call, result: result)
     }
     let mediaChannel = FlutterMethodChannel(
       name: "local_ai_chat/media",
