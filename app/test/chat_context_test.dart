@@ -1,8 +1,37 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:local_ai_chat/chat_context.dart';
 import 'package:local_ai_chat/main.dart';
+import 'package:lib_llama_cpp/lib_llama_cpp.dart';
 
 void main() {
+  test('voice skips status markers but can speak a reply with an action cue', () {
+    expect(isSilentReply('[Stopped]'), isTrue);
+    expect(isSilentReply('[whisper] Come closer.'), isFalse);
+  });
+
+  test('model input alternates roles after failed or missing chat turns', () {
+    LlamaResponseInputItem turn(String role, String text) =>
+        LlamaResponseInputItem(role: role, content: [LlamaTextPart(text)]);
+    final normalized = alternatingTurns([
+      turn('assistant', 'orphaned old answer'),
+      turn('user', 'first question'),
+      turn('assistant', 'first answer'),
+      turn('assistant', 'extra answer'),
+      turn('user', 'message before a failed reply'),
+      LlamaResponseInputItem(
+        role: 'user',
+        content: [
+          LlamaTextPart('Describe this image.'),
+          LlamaImageFilePart(path: 'photo.jpg'),
+        ],
+      ),
+    ]);
+    expect(normalized.map((item) => item.role), ['user', 'assistant', 'user']);
+    final finalParts = normalized.last.content as List<LlamaContentPart>;
+    expect(finalParts.whereType<LlamaImageFilePart>(), hasLength(1));
+    expect(finalParts.whereType<LlamaTextPart>(), hasLength(3));
+  });
+
   test('personality and memory persist per conversation', () {
     final first = Conversation(
       'one',

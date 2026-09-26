@@ -23,7 +23,6 @@ class ImageStudioEngine {
     if (prompt.trim().isEmpty) throw ArgumentError('Describe the edit first.');
     final unsupported = unsupportedImageEdit(prompt);
     if (unsupported != null) throw UnsupportedError(unsupported);
-    final backgroundOnly = isBackgroundReplacement(prompt);
     if (!await File(inputPath).exists()) {
       throw StateError('The selected photo is missing.');
     }
@@ -35,20 +34,13 @@ class ImageStudioEngine {
       if (await findCompatibleCoreMLResources(modelDirectory) == null) {
         throw StateError('Choose an installed iPhone image model first.');
       }
-      onStatus?.call(
-        backgroundOnly
-            ? 'Keeping the original person and creating new scenery…'
-            : 'Editing on this iPhone…',
-      );
+      onStatus?.call('Redrawing the entire photo on this iPhone…');
       final result = await const MethodChannel('local_ai_chat/image_studio')
           .invokeMethod<String>('editImage', {
             'input': inputPath,
             'output': outputPath,
             'modelDirectory': modelDirectory,
-            'prompt': backgroundOnly
-                ? backgroundScenePrompt(prompt)
-                : prompt.trim(),
-            'backgroundOnly': backgroundOnly,
+            'prompt': wholeImageEditPrompt(prompt),
             'strength': strength,
             'steps': steps,
             'seed': seed,

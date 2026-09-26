@@ -2,7 +2,6 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:archive/archive_io.dart';
-import 'package:flutter/services.dart';
 
 import 'image_studio_engine.dart';
 
@@ -154,12 +153,9 @@ class ImageStudioModels {
           'This ZIP needs compiled TextEncoder, UNet, VAE encoder and decoder, vocab.json, and merges.txt files.',
         );
       }
-      status('Checking this model on your iPhone…');
-      final verified = await const MethodChannel('local_ai_chat/image_studio')
-          .invokeMethod<bool>('verifyModel', {'modelDirectory': resources});
-      if (verified != true) {
-        throw StateError('This Core ML model could not load on this iPhone.');
-      }
+      status(
+        'Model files imported. The first edit will test loading on this iPhone.',
+      );
       final cleanedName = displayName
           .replaceAll(RegExp(r'[\r\n\x00-\x1f]'), ' ')
           .trim();

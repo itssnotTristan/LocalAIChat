@@ -29,21 +29,20 @@ void main() {
     expect(unsupportedImageEdit('put my nude portrait in a forest'), isNull);
   });
 
-  test('routes forest background edits without requesting another person', () {
+  test('forest edits use a whole-image prompt instead of a scene cutout', () {
     const prompt = 'make the background look like I am outside in a forest';
     expect(isBackgroundReplacement(prompt), isTrue);
-    final scene = backgroundScenePrompt(prompt);
-    expect(scene, contains('outside in a forest'));
-    expect(scene, contains('forest floor'));
-    expect(scene, isNot(contains('I am')));
-    expect(scene, contains('Photorealistic outdoor woodland'));
+    final instruction = wholeImageEditPrompt(prompt);
+    expect(instruction, contains(prompt));
+    expect(instruction, contains('same subject'));
+    expect(instruction, contains('No pasted cutout'));
     expect(
       isBackgroundReplacement('change the background to a garden'),
       isTrue,
     );
-    expect(backgroundScenePrompt('put me in a forest'), contains('a forest'));
+    expect(wholeImageEditPrompt('put me in a forest'), contains('a forest'));
     expect(
-      backgroundScenePrompt('make it look like I am outdoors'),
+      wholeImageEditPrompt('make it look like I am outdoors'),
       contains('outdoors'),
     );
     expect(isBackgroundReplacement('make the lighting warmer'), isFalse);

@@ -7,9 +7,9 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// by this build, so the UI must never describe this as a paid subscription.
 class UncensoredAccess {
   static const _storage = FlutterSecureStorage();
-  static const _key = 'uncensored_owner_preview_v1';
+  static const _key = 'uncensored_owner_preview_v2';
   static const _ownerHash =
-      'B6FB0EA46AB26EC801B53174472F22ABC5BFA269E56483E485906F186091236C';
+      '70C7869A698B6D9F0622F713E5A18B62CAF0C298D3DB502DE875AF16B58022E1';
 
   static Future<bool> get isUnlocked async =>
       await _storage.read(key: _key) == _ownerHash;

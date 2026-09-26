@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 import 'package:record/record.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 
+import 'speech_text.dart';
+
 class SpeechService {
   SpeechService(this.root);
   final String root;
@@ -51,10 +53,13 @@ class SpeechService {
     return Directory('$ttsDir/espeak-ng-data').exists();
   }
 
-  Future<void> startRecording(String outputPath) async {
+  Future<void> startRecording(
+    String outputPath, {
+    bool interruptPlayback = true,
+  }) async {
     if (!await recorder.hasPermission())
       throw StateError('Microphone permission denied.');
-    if (speaking) await stopSpeaking();
+    if (speaking && interruptPlayback) await stopSpeaking();
     await recorder.start(
       const RecordConfig(
         encoder: AudioEncoder.wav,
@@ -140,9 +145,13 @@ class SpeechService {
     int voiceId = 5,
   }) async {
     final rootPath = root;
+    final spoken = SpeechText.prepare(text);
+    if (spoken.isEmpty) {
+      throw StateError('This reply has no words to speak.');
+    }
     try {
       return await Isolate.run(
-        () => _synthesize(rootPath, text, outputPath, voiceId),
+        () => _synthesize(rootPath, spoken, outputPath, voiceId),
       );
     } catch (_) {
       // Kokoro may fail to allocate after a large iPhone chat model. Keep
@@ -150,7 +159,7 @@ class SpeechService {
       if (!Platform.isIOS) rethrow;
       return Uri(
         scheme: 'system-speech',
-        queryParameters: {'text': text, 'voice': '$voiceId'},
+        queryParameters: {'text': spoken, 'voice': '$voiceId'},
       ).toString();
     }
   }
@@ -194,7 +203,7 @@ class SpeechService {
     }
   }
 
-  Future<void> playFile(String path) async {
+  Future<void> playFile(String path, {double playbackRate = 1.0}) async {
     if (isSystemSpeechPath(path)) {
       final parameters = Uri.parse(path).queryParameters;
       speaking = true;
@@ -202,6 +211,7 @@ class SpeechService {
         await _systemSpeech.invokeMethod<void>('speak', {
           'text': parameters['text'] ?? '',
           'voice': int.tryParse(parameters['voice'] ?? '') ?? 5,
+          'rate': playbackRate,
         });
       } finally {
         speaking = false;
@@ -209,11 +219,29 @@ class SpeechService {
       return;
     }
     await player.stop();
+    if (Platform.isIOS) {
+      // Keep the microphone route active while the reply plays so a caller
+      // can interrupt without restarting the audio session.
+      await player.setAudioContext(
+        AudioContext(
+          iOS: AudioContextIOS(
+            category: AVAudioSessionCategory.playAndRecord,
+            options: {
+              AVAudioSessionOptions.defaultToSpeaker,
+              AVAudioSessionOptions.allowBluetooth,
+              AVAudioSessionOptions.allowBluetoothA2DP,
+            },
+          ),
+        ),
+      );
+    }
     _playStopped = Completer<void>();
     speaking = true;
     try {
+      final completed = player.onPlayerComplete.first;
       await player.play(DeviceFileSource(path));
-      await Future.any([player.onPlayerComplete.first, _playStopped!.future]);
+      await player.setPlaybackRate(playbackRate.clamp(0.5, 2.0));
+      await Future.any([completed, _playStopped!.future]);
     } finally {
       speaking = false;
       _playStopped = null;

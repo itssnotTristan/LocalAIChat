@@ -3,6 +3,9 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
+
+import 'media_picker.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -41,7 +44,7 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
   String status = 'Choose a photo and describe your edit.';
   bool installing = false;
   bool editing = false;
-  double strength = 0.30;
+  double strength = 0.55;
   int steps = 20;
   int seed = -1;
 
@@ -50,11 +53,27 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
     super.initState();
     refreshModels();
     if (Platform.isIOS) {
+      unawaited(checkInterruptedEdit());
       unawaited(pollImageDownload());
       imageDownloadPoll = Timer.periodic(
         const Duration(seconds: 4),
         (_) => unawaited(pollImageDownload()),
       );
+    }
+  }
+
+  Future<void> checkInterruptedEdit() async {
+    try {
+      final stage = await const MethodChannel('local_ai_chat/image_studio')
+          .invokeMethod<String>('lastEditStage');
+      if (stage != null && mounted) {
+        setState(
+          () => status =
+              'The previous edit stopped unexpectedly while $stage. Please share the iPhone crash log so this can be diagnosed.',
+        );
+      }
+    } catch (_) {
+      // Older app builds do not report edit stages.
     }
   }
 
@@ -125,8 +144,7 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
   }
 
   Future<void> pickPhoto() async {
-    final picked = await FilePicker.platform.pickFiles(type: FileType.image);
-    final path = picked?.files.single.path;
+    final path = await pickLocalMedia(context, video: false);
     if (path == null) return;
     try {
       final extension = path.split('.').last.toLowerCase();
@@ -590,23 +608,19 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
                           ),
                         ),
                         const SizedBox(height: 8),
-                        Text(
-                          isBackgroundReplacement(prompt.text)
-                              ? 'Background mode selects the whole subject before generating scenery. Check the silhouette before saving.'
-                              : 'This model redraws the whole photo. Higher strength can change faces, clothing, and pose.',
+                        const Text(
+                          'The whole photo is redrawn, including the subject and scenery. Higher strength changes more of the scene but may change identity or pose. Review the result before saving.',
                         ),
-                        if (!isBackgroundReplacement(prompt.text)) ...[
-                          const SizedBox(height: 12),
-                          Text('Redraw amount · ${(strength * 100).round()}%'),
-                          Slider(
-                            value: strength,
-                            min: 0.20,
-                            max: 0.85,
-                            onChanged: editing
-                                ? null
-                                : (value) => setState(() => strength = value),
-                          ),
-                        ],
+                        const SizedBox(height: 12),
+                        Text('Redraw amount · ${(strength * 100).round()}%'),
+                        Slider(
+                          value: strength,
+                          min: 0.20,
+                          max: 0.85,
+                          onChanged: editing
+                              ? null
+                              : (value) => setState(() => strength = value),
+                        ),
                         Text('Quality steps · $steps'),
                         Slider(
                           value: steps.toDouble(),

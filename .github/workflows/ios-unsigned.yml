@@ -112,17 +112,17 @@ jobs:
           xcrun simctl io "$simulator" screenshot iphone-preview.png
           xcrun simctl terminate "$simulator" com.localai.localAiChat
           mkdir -p "$container/Library/Application Support"
-          printf '%s' '{"themeName":"Chat Dark","backgroundStyle":"Quiet","motion":false,"chats":[{"id":"preview","title":"UI preview","entries":[{"role":"user","text":"Example message","frames":[]},{"role":"assistant","text":"Example reply","frames":[]}]}],"chatId":"preview"}' > "$container/Library/Application Support/local_chat.json"
+          printf '%s' '{"userProfile":{"setupComplete":true},"themeName":"Chat Dark","backgroundStyle":"Quiet","motion":false,"chats":[{"id":"preview","title":"UI preview","entries":[{"role":"user","text":"Example message","frames":[]},{"role":"assistant","text":"Example reply","frames":[]}]}],"chatId":"preview"}' > "$container/Library/Application Support/local_chat.json"
           xcrun simctl launch "$simulator" com.localai.localAiChat
           sleep 5
           xcrun simctl io "$simulator" screenshot iphone-preview-dark.png
           xcrun simctl terminate "$simulator" com.localai.localAiChat
-          printf '%s' '{"themeName":"Chat Dark","backgroundStyle":"Starfield","motion":true,"starColor":4294946166,"chats":[{"id":"preview","title":"Starfield","entries":[{"role":"user","text":"Example message","frames":[]},{"role":"assistant","text":"Example reply","frames":[]}]}],"chatId":"preview"}' > "$container/Library/Application Support/local_chat.json"
+          printf '%s' '{"userProfile":{"setupComplete":true},"themeName":"Chat Dark","backgroundStyle":"Starfield","motion":true,"starColor":4294946166,"chats":[{"id":"preview","title":"Starfield","entries":[{"role":"user","text":"Example message","frames":[]},{"role":"assistant","text":"Example reply","frames":[]}]}],"chatId":"preview"}' > "$container/Library/Application Support/local_chat.json"
           xcrun simctl launch "$simulator" com.localai.localAiChat
           sleep 5
           xcrun simctl io "$simulator" screenshot iphone-preview-stars.png
           xcrun simctl terminate "$simulator" com.localai.localAiChat
-          printf '%s' '{"themeName":"Chat Dark","backgroundStyle":"Northern Lights","motion":true,"auroraColor":4284028602,"chats":[{"id":"preview","title":"Northern Lights","entries":[{"role":"user","text":"Example message","frames":[]},{"role":"assistant","text":"Example reply","frames":[]}]}],"chatId":"preview"}' > "$container/Library/Application Support/local_chat.json"
+          printf '%s' '{"userProfile":{"setupComplete":true},"themeName":"Chat Dark","backgroundStyle":"Northern Lights","motion":true,"auroraColor":4284028602,"chats":[{"id":"preview","title":"Northern Lights","entries":[{"role":"user","text":"Example message","frames":[]},{"role":"assistant","text":"Example reply","frames":[]}]}],"chatId":"preview"}' > "$container/Library/Application Support/local_chat.json"
           xcrun simctl launch "$simulator" com.localai.localAiChat
           sleep 5
           xcrun simctl io "$simulator" screenshot iphone-preview-aurora.png
