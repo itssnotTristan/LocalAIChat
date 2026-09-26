@@ -184,6 +184,7 @@ final class ImageStudioBridge {
   /// The foreground-instance model follows the complete visible subject.
   /// The older person model is used only to identify which instance is human;
   /// its truncated matte is never used for the final composite.
+  @available(iOS 17.0, *)
   private func makeSubjectMask(for photo: CGImage) throws -> CIImage {
     let handler = VNImageRequestHandler(cgImage: photo, options: [:])
     let personRequest = VNGeneratePersonSegmentationRequest()
