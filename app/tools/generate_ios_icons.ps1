@@ -1,12 +1,19 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Source
+    [string]$Source,
+    [ValidatePattern('^[A-Za-z0-9-]+$')]
+    [string]$IconSetName = 'AppIcon'
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
-$iconDirectory = Join-Path $PSScriptRoot '..\ios\Runner\Assets.xcassets\AppIcon.appiconset'
+$assetDirectory = Join-Path $PSScriptRoot '..\ios\Runner\Assets.xcassets'
+$iconDirectory = Join-Path $assetDirectory "$IconSetName.appiconset"
+if (-not (Test-Path -LiteralPath $iconDirectory)) {
+    New-Item -ItemType Directory -Path $iconDirectory | Out-Null
+    Copy-Item -LiteralPath (Join-Path $assetDirectory 'AppIcon.appiconset\Contents.json') -Destination $iconDirectory
+}
 $catalog = Get-Content (Join-Path $iconDirectory 'Contents.json') -Raw | ConvertFrom-Json
 $sourceImage = [System.Drawing.Image]::FromFile((Resolve-Path $Source).Path)
 

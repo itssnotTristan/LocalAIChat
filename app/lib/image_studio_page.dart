@@ -421,6 +421,8 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       motion: design.motion,
       speed: design.speed,
       backgroundStyle: design.backgroundStyle,
+      backgroundImagePath: design.backgroundImagePath,
+      backgroundPhotoDim: design.backgroundPhotoDim,
       child: Stack(
         children: [
           const Positioned.fill(child: GlassBackground()),

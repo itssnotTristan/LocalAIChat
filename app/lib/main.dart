@@ -9,6 +9,7 @@ import 'package:lib_llama_cpp/lib_llama_cpp.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'app_icon.dart';
 import 'glass_design.dart';
 import 'inference_profile.dart';
 import 'inference_attempt.dart';
@@ -157,7 +158,7 @@ class LocalChatApp extends StatelessWidget {
   const LocalChatApp({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-    title: 'Local AI Chat',
+    title: 'FluxLira',
     debugShowCheckedModeBanner: false,
     theme: ThemeData(colorSchemeSeed: Colors.deepPurple, useMaterial3: true),
     darkTheme: ThemeData(
@@ -332,6 +333,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Color starBackgroundColor = const Color(0xFF091326);
   Color auroraColor = const Color(0xFF58F6BA);
   String backgroundStyle = 'Waves';
+  String? backgroundImagePath;
+  double backgroundPhotoDim = 0.4;
   bool motion = true;
   double motionSpeed = 1.0;
   SpeechService? speech;
@@ -1040,6 +1043,28 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         );
         auroraColor = Color(data['auroraColor'] as int? ?? 0xFF58F6BA);
         backgroundStyle = data['backgroundStyle'] as String? ?? 'Waves';
+        final backgroundFile = data['backgroundImageFile'] as String?;
+        if (backgroundFile != null &&
+            backgroundFile.isNotEmpty &&
+            !backgroundFile.contains(RegExp(r'[/\\]')) &&
+            backgroundFile != '.' &&
+            backgroundFile != '..') {
+          final savedBackground = File(
+            '${dataDir!.path}${Platform.pathSeparator}backgrounds'
+            '${Platform.pathSeparator}$backgroundFile',
+          );
+          if (await savedBackground.exists()) {
+            backgroundImagePath = savedBackground.path;
+          }
+        }
+        backgroundPhotoDim =
+            ((data['backgroundPhotoDim'] as num?)?.toDouble() ?? 0.4).clamp(
+              0.0,
+              0.8,
+            );
+        if (backgroundStyle == 'My Photo' && backgroundImagePath == null) {
+          backgroundStyle = 'Waves';
+        }
         motion = data['motion'] as bool? ?? true;
         motionSpeed = (data['motionSpeed'] as num?)?.toDouble() ?? 1.0;
         speechRoot = data['speechRoot'] as String?;
@@ -1257,6 +1282,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         'starBackgroundColor': starBackgroundColor.toARGB32(),
         'auroraColor': auroraColor.toARGB32(),
         'backgroundStyle': backgroundStyle,
+        'backgroundImageFile': backgroundImagePath
+            ?.split(RegExp(r'[/\\]'))
+            .last,
+        'backgroundPhotoDim': backgroundPhotoDim,
         'motion': motion,
         'motionSpeed': motionSpeed,
         'speechRoot': speechRoot,
@@ -1530,6 +1559,40 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     }
     return (await File(path).copy(destination)).path;
+  }
+
+  Future<String> importBackgroundPhoto(String source) async {
+    final directory = Directory(
+      '${dataDir!.path}${Platform.pathSeparator}backgrounds',
+    );
+    await directory.create(recursive: true);
+    if (Platform.isIOS) {
+      final destination =
+          '${directory.path}${Platform.pathSeparator}'
+          'background_${DateTime.now().microsecondsSinceEpoch}.jpg';
+      final result = await const MethodChannel('local_ai_chat/media')
+          .invokeMethod<String>('prepareImage', {
+            'source': source,
+            'destination': destination,
+            'maxSide': '1536',
+          });
+      if (result == null || !await File(result).exists()) {
+        throw const FileSystemException('Could not save the background photo.');
+      }
+      return result;
+    }
+    return copyIntoApp(source, 'backgrounds');
+  }
+
+  Future<void> deleteOldBackgroundPhoto(String? oldPath) async {
+    if (oldPath == null || oldPath == backgroundImagePath) return;
+    final directory = Directory(
+      '${dataDir!.path}${Platform.pathSeparator}backgrounds',
+    );
+    if (File(oldPath).parent.path == directory.path) {
+      final file = File(oldPath);
+      if (await file.exists()) await file.delete();
+    }
   }
 
   Future<void> importModel({required bool projector}) async {
@@ -2647,6 +2710,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         motion: motion,
         speed: motionSpeed,
         backgroundStyle: backgroundStyle,
+        backgroundImagePath: backgroundImagePath,
+        backgroundPhotoDim: backgroundPhotoDim,
         child: StatefulBuilder(
           builder: (dialogContext, update) => Dialog(
             backgroundColor: Colors.transparent,
@@ -2755,6 +2820,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       motion: motion,
       speed: motionSpeed,
       backgroundStyle: backgroundStyle,
+      backgroundImagePath: backgroundImagePath,
+      backgroundPhotoDim: backgroundPhotoDim,
       child: const SizedBox.shrink(),
     );
     final result = await Navigator.of(context).push<String>(
@@ -2789,6 +2856,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           motion: motion,
           speed: motionSpeed,
           backgroundStyle: backgroundStyle,
+          backgroundImagePath: backgroundImagePath,
+          backgroundPhotoDim: backgroundPhotoDim,
           child: OfflineLibraryPage(
             library: currentLibrary,
             onAsk: (message) {
@@ -3054,6 +3123,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> showSettings() async {
+    var iconSupported = false;
+    var currentIcon = AppIconChoice.plasma;
+    try {
+      iconSupported = await AppIconService.supported;
+      if (iconSupported) currentIcon = await AppIconService.current();
+    } catch (_) {
+      iconSupported = false;
+    }
+    if (!mounted) return;
     final promptController = TextEditingController(text: instructions);
     final speechController = TextEditingController(text: speechRoot ?? '');
     var selectedCustom = customColor;
@@ -3084,6 +3162,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     var pauseMilliseconds = callPauseMilliseconds;
     var selectedTheme = themeName;
     var selectedStyle = backgroundStyle;
+    var selectedPhotoPath = backgroundImagePath;
+    var selectedPhotoDim = backgroundPhotoDim;
+    var selectedIcon = currentIcon;
     var animated = motion;
     var speed = motionSpeed;
     var spokenReplies = autoSpeak;
@@ -3181,6 +3262,56 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     title: const Text('Appearance'),
                     subtitle: Text('$selectedTheme · $selectedStyle'),
                     children: [
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'App icon',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: AppIconChoice.values.map((choice) {
+                          final selected = choice == selectedIcon;
+                          return OutlinedButton(
+                            onPressed: iconSupported
+                                ? () => update(() => selectedIcon = choice)
+                                : null,
+                            style: OutlinedButton.styleFrom(
+                              side: selected
+                                  ? BorderSide(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .primary,
+                                      width: 2,
+                                    )
+                                  : null,
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(14),
+                                  child: Image.asset(
+                                    choice.previewAsset,
+                                    width: 52,
+                                    height: 52,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(choice.label),
+                              ],
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      if (!iconSupported)
+                        const Text(
+                          'Home Screen icon changes are available on iPhone.',
+                        ),
                       DropdownButtonFormField<String>(
                         initialValue: selectedTheme,
                         decoration: const InputDecoration(
@@ -3295,6 +3426,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         ),
                       ],
                       DropdownButtonFormField<String>(
+                        key: ValueKey(selectedStyle),
                         initialValue: selectedStyle,
                         decoration: const InputDecoration(
                           labelText: 'Background',
@@ -3310,6 +3442,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   'Northern Lights',
                                   'Mesh',
                                   'Quiet',
+                                  'My Photo',
                                 ]
                                 .map(
                                   (name) => DropdownMenuItem(
@@ -3322,6 +3455,69 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           () => selectedStyle = value ?? selectedStyle,
                         ),
                       ),
+                      if (selectedStyle == 'My Photo' ||
+                          selectedPhotoPath != null) ...[
+                        const SizedBox(height: 8),
+                        if (selectedPhotoPath != null)
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Image.file(
+                              File(selectedPhotoPath!),
+                              height: 120,
+                              width: 220,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => const Text(
+                                'This photo is unavailable. Choose another.',
+                              ),
+                            ),
+                          ),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            TextButton.icon(
+                              icon: const Icon(Icons.photo_library_outlined),
+                              label: Text(
+                                selectedPhotoPath == null
+                                    ? 'Choose photo'
+                                    : 'Change photo',
+                              ),
+                              onPressed: () async {
+                                final picked = await FilePicker.platform
+                                    .pickFiles(type: FileType.image);
+                                final path = picked?.files.single.path;
+                                if (path == null || !context.mounted) return;
+                                update(() {
+                                  selectedPhotoPath = path;
+                                  selectedStyle = 'My Photo';
+                                });
+                              },
+                            ),
+                            if (selectedPhotoPath != null)
+                              TextButton(
+                                onPressed: () => update(() {
+                                  selectedPhotoPath = null;
+                                  if (selectedStyle == 'My Photo') {
+                                    selectedStyle = 'Waves';
+                                  }
+                                }),
+                                child: const Text('Remove'),
+                              ),
+                          ],
+                        ),
+                        if (selectedStyle == 'My Photo') ...[
+                          Text(
+                            'Photo darkness: ${(selectedPhotoDim * 100).round()}%',
+                          ),
+                          Slider(
+                            value: selectedPhotoDim,
+                            min: 0,
+                            max: 0.8,
+                            divisions: 16,
+                            onChanged: (value) =>
+                                update(() => selectedPhotoDim = value),
+                          ),
+                        ],
+                      ],
                       if (selectedStyle == 'Starfield' ||
                           selectedStyle == 'Northern Lights') ...[
                         const SizedBox(height: 8),
@@ -3699,51 +3895,87 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: () async {
-                if (fishKeyController.text.trim().isNotEmpty) {
-                  try {
-                    await FishVoice.saveKey(fishKeyController.text);
-                    fishHasKey = true;
-                  } catch (error) {
-                    if (mounted)
-                      showProblem(
-                        'Could not save Fish Audio key securely: $error',
-                      );
-                    return;
-                  }
-                }
-                instructions = promptController.text;
-                frameCount = count;
-                maxTokens = limit;
-                inferenceProfile = profile;
-                mediaReplyStyle = replyStyle;
-                routeTextToChatModel = autoTextRouting;
-                callPauseMilliseconds = pauseMilliseconds;
-                setState(() {
-                  themeName = selectedTheme;
-                  customColor = selectedCustom;
-                  starColor = selectedStar;
-                  starBackgroundColor = selectedStarBackground;
-                  auroraColor = selectedAurora;
-                  backgroundStyle = selectedStyle;
-                  motion = animated;
-                  motionSpeed = speed;
-                  speechRoot = speechController.text.trim();
-                  autoSpeak = spokenReplies;
-                  selectedVoice = voice;
-                  voiceSource = source;
-                  fishVoiceId = FishVoice.voiceIdFromInput(
-                    fishIdController.text,
-                  );
-                  if (speechRoot != null && speechRoot!.isNotEmpty) {
-                    final previous = speech;
-                    speech = SpeechService(speechRoot!);
-                    if (previous != null) unawaited(previous.dispose());
-                  }
-                });
-                Navigator.pop(context);
-                unawaited(save());
-              },
+              onPressed:
+                  selectedStyle == 'My Photo' && selectedPhotoPath == null
+                  ? null
+                  : () async {
+                      if (fishKeyController.text.trim().isNotEmpty) {
+                        try {
+                          await FishVoice.saveKey(fishKeyController.text);
+                          fishHasKey = true;
+                        } catch (error) {
+                          if (mounted)
+                            showProblem(
+                              'Could not save Fish Audio key securely: $error',
+                            );
+                          return;
+                        }
+                      }
+                      var savedPhotoPath = selectedPhotoPath;
+                      if (selectedPhotoPath != null &&
+                          selectedPhotoPath != backgroundImagePath) {
+                        try {
+                          savedPhotoPath = await importBackgroundPhoto(
+                            selectedPhotoPath!,
+                          );
+                        } catch (error) {
+                          if (mounted)
+                            showProblem(
+                              'Could not add background photo: $error',
+                            );
+                          return;
+                        }
+                      }
+                      if (!mounted || !context.mounted) return;
+                      final oldPhotoPath = backgroundImagePath;
+                      instructions = promptController.text;
+                      frameCount = count;
+                      maxTokens = limit;
+                      inferenceProfile = profile;
+                      mediaReplyStyle = replyStyle;
+                      routeTextToChatModel = autoTextRouting;
+                      callPauseMilliseconds = pauseMilliseconds;
+                      setState(() {
+                        themeName = selectedTheme;
+                        customColor = selectedCustom;
+                        starColor = selectedStar;
+                        starBackgroundColor = selectedStarBackground;
+                        auroraColor = selectedAurora;
+                        backgroundStyle = selectedStyle;
+                        backgroundImagePath = savedPhotoPath;
+                        backgroundPhotoDim = selectedPhotoDim;
+                        motion = animated;
+                        motionSpeed = speed;
+                        speechRoot = speechController.text.trim();
+                        autoSpeak = spokenReplies;
+                        selectedVoice = voice;
+                        voiceSource = source;
+                        fishVoiceId = FishVoice.voiceIdFromInput(
+                          fishIdController.text,
+                        );
+                        if (speechRoot != null && speechRoot!.isNotEmpty) {
+                          final previous = speech;
+                          speech = SpeechService(speechRoot!);
+                          if (previous != null) unawaited(previous.dispose());
+                        }
+                      });
+                      Navigator.pop(context);
+                      try {
+                        await save();
+                        await deleteOldBackgroundPhoto(oldPhotoPath);
+                      } catch (error) {
+                        if (mounted)
+                          showProblem('Could not save appearance: $error');
+                      }
+                      if (iconSupported && selectedIcon != currentIcon) {
+                        try {
+                          await AppIconService.set(selectedIcon);
+                        } catch (error) {
+                          if (mounted)
+                            showProblem('Could not change app icon: $error');
+                        }
+                      }
+                    },
               child: const Text('Save'),
             ),
           ],
@@ -3923,6 +4155,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       motion: motion,
       speed: motionSpeed,
       backgroundStyle: backgroundStyle,
+      backgroundImagePath: backgroundImagePath,
+      backgroundPhotoDim: backgroundPhotoDim,
       child: Theme(
         data: ThemeData(
           colorScheme: ColorScheme.fromSeed(
@@ -3940,7 +4174,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               appBar: AppBar(
                 backgroundColor: Colors.transparent,
                 title: Text(
-                  chats.isEmpty ? 'LOCAL AI CHAT' : chat.title,
+                  chats.isEmpty ? 'FLUXLIRA' : chat.title,
                   style: const TextStyle(
                     fontWeight: FontWeight.w800,
                     letterSpacing: 1.5,

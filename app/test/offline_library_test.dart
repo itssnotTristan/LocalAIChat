@@ -85,6 +85,8 @@ void main() {
           motion: false,
           speed: 1,
           backgroundStyle: 'Waves',
+          backgroundImagePath: null,
+          backgroundPhotoDim: 0.4,
           child: OfflineLibraryPage(library: library, onAsk: (_) {}),
         ),
       ),

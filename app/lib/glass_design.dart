@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -205,6 +206,8 @@ class GlassDesign extends InheritedWidget {
     required this.motion,
     required this.speed,
     required this.backgroundStyle,
+    required this.backgroundImagePath,
+    required this.backgroundPhotoDim,
     required super.child,
     super.key,
   });
@@ -216,6 +219,8 @@ class GlassDesign extends InheritedWidget {
   final bool motion;
   final double speed;
   final String backgroundStyle;
+  final String? backgroundImagePath;
+  final double backgroundPhotoDim;
   static GlassDesign of(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<GlassDesign>()!;
   @override
@@ -227,7 +232,9 @@ class GlassDesign extends InheritedWidget {
       auroraColor != oldWidget.auroraColor ||
       motion != oldWidget.motion ||
       speed != oldWidget.speed ||
-      backgroundStyle != oldWidget.backgroundStyle;
+      backgroundStyle != oldWidget.backgroundStyle ||
+      backgroundImagePath != oldWidget.backgroundImagePath ||
+      backgroundPhotoDim != oldWidget.backgroundPhotoDim;
 }
 
 class GlassBackground extends StatefulWidget {
@@ -244,7 +251,9 @@ class _GlassBackgroundState extends State<GlassBackground> {
     super.didChangeDependencies();
     timer?.cancel();
     final design = GlassDesign.of(context);
-    if (design.motion && !MediaQuery.disableAnimationsOf(context)) {
+    if (design.motion &&
+        design.backgroundStyle != 'My Photo' &&
+        !MediaQuery.disableAnimationsOf(context)) {
       timer = Timer.periodic(const Duration(milliseconds: 33), (_) {
         if (mounted) setState(() => tick += 0.033 * design.speed);
       });
@@ -261,6 +270,32 @@ class _GlassBackgroundState extends State<GlassBackground> {
   Widget build(BuildContext context) {
     final design = GlassDesign.of(context);
     final palette = GlassPalette.resolve(design.themeName, design.customColor);
+    if (design.backgroundStyle == 'My Photo' &&
+        design.backgroundImagePath != null) {
+      final imageWidth =
+          (MediaQuery.sizeOf(context).width *
+                  MediaQuery.devicePixelRatioOf(context))
+              .round()
+              .clamp(320, 1536);
+      return RepaintBoundary(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Image.file(
+              File(design.backgroundImagePath!),
+              fit: BoxFit.cover,
+              cacheWidth: imageWidth,
+              errorBuilder: (_, _, _) => ColoredBox(color: palette.base),
+            ),
+            ColoredBox(
+              color: Colors.black.withValues(
+                alpha: design.backgroundPhotoDim.clamp(0.0, 0.8),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     final rainbow = design.themeName == 'Rainbow';
     final shift = rainbow ? tick * 0.18 : 0.0;
     final accent = rainbow
