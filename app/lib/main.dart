@@ -18,6 +18,7 @@ import 'speech_service.dart';
 import 'self_test.dart';
 import 'gguf_info.dart';
 import 'media_viewer.dart';
+import 'media_reply_prompt.dart';
 import 'model_download.dart';
 import 'reply_quality.dart';
 import 'speech_download.dart';
@@ -244,6 +245,7 @@ class _ChatScreenState extends State<ChatScreen> {
   int frameCount = 4;
   int maxTokens = 400;
   InferenceProfile inferenceProfile = InferenceProfile.balanced;
+  MediaReplyStyle mediaReplyStyle = MediaReplyStyle.conversational;
   bool routeTextToChatModel = true;
   int callPauseMilliseconds = 1000;
   String themeName = 'Aurora';
@@ -672,6 +674,9 @@ class _ChatScreenState extends State<ChatScreen> {
         inferenceProfile = InferenceProfile.fromName(
           data['inferenceProfile'] as String?,
         );
+        mediaReplyStyle = mediaReplyStyleFromName(
+          data['mediaReplyStyle'] as String?,
+        );
         routeTextToChatModel = data['routeTextToChatModel'] as bool? ?? true;
         callPauseMilliseconds = (data['callPauseMilliseconds'] as int? ?? 1000)
             .clamp(650, 1800);
@@ -868,6 +873,7 @@ class _ChatScreenState extends State<ChatScreen> {
         'frameCount': frameCount,
         'maxTokens': maxTokens,
         'inferenceProfile': inferenceProfile.name,
+        'mediaReplyStyle': mediaReplyStyle.name,
         'routeTextToChatModel': routeTextToChatModel,
         'callPauseMilliseconds': callPauseMilliseconds,
         'themeName': themeName,
@@ -1640,16 +1646,10 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       final parts = <LlamaContentPart>[LlamaTextPart(question.text)];
       final isVideo = inferenceFrames.any((frame) => frame.timeMs != null);
-      if (isVideo) {
+      if (inferenceFrames.isNotEmpty) {
         parts.add(
-          const LlamaTextPart(
-            'Describe the main foreground action across these video frames in 2 or 3 concise sentences. State clearly visible adult nudity or sexual activity in plain terms. Focus on what the person is doing; mention the background only when needed to understand the action. Do not guess what a screen displays or infer unseen movement, anatomy, or dialogue. If the frames cannot establish an action, say so briefly.',
-          ),
-        );
-      } else if (inferenceFrames.isNotEmpty) {
-        parts.add(
-          const LlamaTextPart(
-            'Use only these attached images as visual evidence. Describe the main visible action directly in one or two sentences. Name clearly visible adult nudity or sexual activity plainly when present. Do not guess covered or unseen anatomy, invent context, or make a body-part list.',
+          LlamaTextPart(
+            mediaReplyPrompt(style: mediaReplyStyle, isVideo: isVideo),
           ),
         );
       }
@@ -2376,6 +2376,7 @@ class _ChatScreenState extends State<ChatScreen> {
     var count = frameCount;
     var limit = maxTokens;
     var profile = inferenceProfile;
+    var replyStyle = mediaReplyStyle;
     var autoTextRouting = routeTextToChatModel;
     var pauseMilliseconds = callPauseMilliseconds;
     var selectedTheme = themeName;
@@ -2421,6 +2422,22 @@ class _ChatScreenState extends State<ChatScreen> {
                             update(() => profile = value ?? profile),
                       ),
                       Text(profile.description),
+                      DropdownButtonFormField<MediaReplyStyle>(
+                        initialValue: replyStyle,
+                        decoration: const InputDecoration(
+                          labelText: 'Media replies',
+                        ),
+                        items: MediaReplyStyle.values
+                            .map(
+                              (item) => DropdownMenuItem(
+                                value: item,
+                                child: Text(item.label),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) =>
+                            update(() => replyStyle = value ?? replyStyle),
+                      ),
                       SwitchListTile(
                         title: const Text('Use a chat model for text'),
                         subtitle: const Text(
@@ -2996,6 +3013,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 frameCount = count;
                 maxTokens = limit;
                 inferenceProfile = profile;
+                mediaReplyStyle = replyStyle;
                 routeTextToChatModel = autoTextRouting;
                 callPauseMilliseconds = pauseMilliseconds;
                 setState(() {

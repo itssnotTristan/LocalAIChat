@@ -12,6 +12,7 @@ import 'package:video_player/video_player.dart';
 
 import 'speech_service.dart';
 import 'chat_context.dart';
+import 'media_reply_prompt.dart';
 import 'reply_quality.dart';
 import 'video_duration.dart';
 import 'video_sampler.dart';
@@ -245,6 +246,7 @@ Future<void> runVideoProbe(List<String> args) async {
   final framesFolder = Directory('${report.parent.path}/video-probe-frames');
   final output = <String, dynamic>{'video': args[4]};
   final frameLimit = args.length > 5 ? int.parse(args[5]) : 4;
+  final question = args.length > 6 ? args[6] : null;
   try {
     final duration = await VideoDuration.read(args[4]);
     output['durationMs'] = duration.inMilliseconds;
@@ -260,8 +262,14 @@ Future<void> runVideoProbe(List<String> args) async {
     output['frameLimit'] = frameLimit;
     await report.writeAsString(jsonEncode(output));
     final parts = <LlamaContentPart>[
-      const LlamaTextPart(
-        'Describe the main foreground action across these video frames in 2 or 3 concise sentences. State clearly visible adult nudity or sexual activity in plain terms. Focus on what the person is doing; mention the background only when needed to understand the action. Do not guess what a screen displays or infer unseen movement, anatomy, or dialogue. If the frames cannot establish an action, say so briefly.',
+      LlamaTextPart(question ?? 'Describe this video.'),
+      LlamaTextPart(
+        mediaReplyPrompt(
+          style: question == null
+              ? MediaReplyStyle.descriptive
+              : MediaReplyStyle.conversational,
+          isVideo: true,
+        ),
       ),
     ];
     for (final frame in frames) {
@@ -289,7 +297,8 @@ Future<void> runVideoProbe(List<String> args) async {
     await for (final event in client.responses.stream(
       model: 'probe',
       input: [LlamaResponseInputItem(role: 'user', content: parts)],
-      instructions: 'Answer from visual evidence only. Write natural prose without repetitive body-part lists. /no_think',
+      instructions:
+          '${ChatContext.instructions(global: 'You are a private local assistant.', personality: question == null ? 'Default' : 'Horny', customPersonality: '', memory: '')}\n/no_think',
       maxOutputTokens: 160,
       temperature: 0.65,
       topP: 0.90,

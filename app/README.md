@@ -13,6 +13,8 @@ An offline Flutter chat app for Windows and iOS. The app stores chats and import
 7. **Settings > Appearance** has glass palettes, Chat Dark, custom colors, animated ribbons, a dense twinkling Starfield, and moving Northern Lights. The custom picker accepts any color. Starfield has independent star and background colors; Northern Lights has its own color.
 8. Tap **Quick / Balanced / Detailed** beside the chat status to change the real inference workload. Quick uses smaller image input and shorter replies; Detailed uses higher image resolution, more context, and a larger reply budget. The status shows the total response time and time to the first word.
 
+**Media replies** defaults to **Conversational**: the model is asked to answer the user's question or opinion request before mentioning what the image or frames show. **Descriptive** produces a brief visual summary. Both modes tell the model not to invent unseen anatomy or actions.
+
 Vision models can misinterpret scenes. Only selected frames are passed to them, and they do not listen to video audio. The prompt asks for visible details only, and a repeated sentence pattern is cut off before it fills the reply. A text response that merely echoes the user or invents an unattached image is retried once. This reduces runaway hallucinations but does not guarantee factual accuracy. An immediate correction or request to review the media reuses the selected frames; unrelated chat does not. An error keeps the draft and attachments available for retry. The app prompts the assistant to speak naturally, express appropriate emotion, and respect consent, honesty, fairness, empathy, and privacy; a model cannot be guaranteed to experience emotions or apply those values perfectly.
 
 ## Build from source
