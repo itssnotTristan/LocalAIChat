@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import 'user_profile.dart';
@@ -208,18 +210,22 @@ class _UserProfilePageState extends State<UserProfilePage> {
                 ),
               ],
               const SizedBox(height: 24),
-              const ListTile(
-                leading: Icon(Icons.photo_library_outlined),
-                title: Text('Photos and videos'),
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Photos and videos'),
                 subtitle: Text(
-                  'Choose media for chats or Image Studio with the iOS photo picker. You choose what to share; no full-library access is needed.',
+                  Platform.isAndroid
+                      ? 'Choose photos and videos for chat with the Android system picker. Only selected files are shared with FluxLira.'
+                      : 'Choose media for chats or Image Studio with the iOS photo picker. You choose what to share; no full-library access is needed.',
                 ),
               ),
-              const ListTile(
-                leading: Icon(Icons.folder_outlined),
-                title: Text('Models and files'),
+              ListTile(
+                leading: const Icon(Icons.folder_outlined),
+                title: const Text('Models and files'),
                 subtitle: Text(
-                  'Downloads save in this app. To import your own model, choose it with the iOS Files picker. There is no blanket Files permission.',
+                  Platform.isAndroid
+                      ? 'Model downloads save inside FluxLira. Import your own GGUF model with the Android file picker; no storage permission is needed.'
+                      : 'Downloads save in this app. To import your own model, choose it with the iOS Files picker. There is no blanket Files permission.',
                 ),
               ),
               const SizedBox(height: 12),

@@ -1651,7 +1651,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       '${dataDir!.path}${Platform.pathSeparator}backgrounds',
     );
     await directory.create(recursive: true);
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       final destination =
           '${directory.path}${Platform.pathSeparator}'
           'background_${DateTime.now().microsecondsSinceEpoch}.jpg';
@@ -1833,7 +1833,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     try {
       final owned = await copyIntoApp(path, 'media');
       var ready = owned;
-      if (Platform.isIOS) {
+      if (Platform.isIOS || Platform.isAndroid) {
         final destination = '$owned.jpg';
         try {
           ready =
@@ -2270,7 +2270,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           );
         }
         var inferencePath = frame.path;
-        if (Platform.isIOS && inferenceProfile.imageSide < 1024) {
+        if ((Platform.isIOS || Platform.isAndroid) &&
+            inferenceProfile.imageSide < 1024) {
           final resized =
               '${frame.path}.inference_${inferenceProfile.imageSide}.jpg';
           inferencePath =
@@ -2576,7 +2577,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       currentVideoPlaybackPath = originalVideoPlaybackPath;
       currentVideoDurationMs = originalVideoDurationMs;
       final message = isContextMemoryFailure(error)
-          ? '${model.name} could not fit in iPhone memory, even after a smaller retry. Close other apps, choose Quick mode or a smaller vision model, then send again. Your draft and media are saved.'
+          ? '${model.name} could not fit in device memory, even after a smaller retry. Close other apps, choose Quick mode or a smaller vision model, then send again. Your draft and media are saved.'
           : error.toString().contains('Failed to load model:')
           ? 'Could not load ${model.name}. Close other apps and retry; if it keeps failing, remove and download or import that model again. Your draft is saved.'
           : 'Local generation failed: $error';
@@ -2630,7 +2631,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         if (mounted) {
           setState(
             () => status = SpeechService.isSystemSpeechPath(audioPath)
-                ? 'Speaking with iPhone voice…'
+                ? 'Speaking with device voice…'
                 : 'Speaking…',
           );
         }
@@ -4232,7 +4233,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               final retained = await FishVoice.hasKey;
                               if (!retained) {
                                 throw StateError(
-                                  'The key was not retained by iPhone secure storage.',
+                                  'The key was not retained by device secure storage.',
                                 );
                               }
                               fishHasKey = true;
@@ -4245,7 +4246,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                 keySaved = true;
                                 fishKeyController.clear();
                                 fishKeyStatus =
-                                    'Fish key and voice saved on this iPhone.';
+                                    'Fish key and voice saved on this device.';
                               });
                             } catch (error) {
                               if (!context.mounted) return;
@@ -4761,8 +4762,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       ListTile(
                         leading: const Icon(Icons.auto_fix_high),
                         title: const Text('Image Studio'),
-                        subtitle: const Text('Edit photos locally'),
-                        onTap: busy || callActive
+                        subtitle: Text(Platform.isAndroid
+                            ? 'Image editing is coming to Android'
+                            : 'Edit photos locally'),
+                        onTap: busy || callActive || Platform.isAndroid
                             ? null
                             : () {
                                 Navigator.pop(context);

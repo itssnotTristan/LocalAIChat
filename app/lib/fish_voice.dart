@@ -63,7 +63,7 @@ class FishVoice {
       // write without making the value available to a subsequent read.
       if (await _store.read(key: _keyName) != value) {
         throw StateError(
-          'The key was not retained by iPhone secure storage. Check the app signing and Keychain capability.',
+          'The key was not retained by device secure storage. Check the app storage configuration.',
         );
       }
     }

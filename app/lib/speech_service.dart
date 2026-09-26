@@ -53,6 +53,14 @@ class SpeechService {
     return Directory('$ttsDir/espeak-ng-data').exists();
   }
 
+  static Future<bool> hasTtsModel(String root) async {
+    final folder = '$root/kokoro-en-v0_19';
+    for (final name in ['model.onnx', 'voices.bin', 'tokens.txt']) {
+      if (!await File('$folder/$name').exists()) return false;
+    }
+    return Directory('$folder/espeak-ng-data').exists();
+  }
+
   Future<void> startRecording(
     String outputPath, {
     bool interruptPlayback = true,
@@ -149,14 +157,21 @@ class SpeechService {
     if (spoken.isEmpty) {
       throw StateError('This reply has no words to speak.');
     }
+    if ((Platform.isIOS || Platform.isAndroid) &&
+        !await hasTtsModel(rootPath)) {
+      return Uri(
+        scheme: 'system-speech',
+        queryParameters: {'text': spoken, 'voice': '$voiceId'},
+      ).toString();
+    }
     try {
       return await Isolate.run(
         () => _synthesize(rootPath, spoken, outputPath, voiceId),
       );
     } catch (_) {
-      // Kokoro may fail to allocate after a large iPhone chat model. Keep
-      // speech entirely on the device using the system's installed voices.
-      if (!Platform.isIOS) rethrow;
+      // Kokoro may fail to allocate after a large local chat model. Keep
+      // speech on the device using the platform's installed voices.
+      if (!Platform.isIOS && !Platform.isAndroid) rethrow;
       return Uri(
         scheme: 'system-speech',
         queryParameters: {'text': spoken, 'voice': '$voiceId'},
@@ -261,7 +276,7 @@ class SpeechService {
     if (_playStopped != null && !_playStopped!.isCompleted)
       _playStopped!.complete();
     await player.stop();
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       await _systemSpeech.invokeMethod<void>('stop');
     }
     speaking = false;

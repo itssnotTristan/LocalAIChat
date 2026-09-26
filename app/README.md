@@ -1,8 +1,8 @@
 # FluxLira
 
-An offline Flutter chat app focused on iPhone. The app stores chats and imported media on the device. Model and speech downloads are initiated by the user; chat and media analysis do not call a cloud inference service. Fish Audio is an optional online voice service that is off by default.
+An offline Flutter chat app for iPhone, with an Android preview in development. The app stores chats and imported media on the device. Model and speech downloads are initiated by the user; chat and media analysis do not call a cloud inference service. Fish Audio is an optional online voice service that is off by default.
 
-The default sharpened icon source, with orange liquid-glass loops and an electric-blue plasma orb, is in `branding/orange-blue-plasma-crisp-bloom-master.png`. Two alternate iPhone icons are bundled: Orange Glass and Electric Glass. The app keeps its existing bundle identifier so this update can retain installed chats and settings.
+The default sharpened icon source, with orange liquid-glass loops and an electric-blue plasma orb, is in `branding/orange-blue-plasma-crisp-bloom-master.png`. The Android launcher uses the same artwork. Two alternate iPhone icons are bundled: Orange Glass and Electric Glass. The iOS app keeps its existing bundle identifier so this update can retain installed chats and settings.
 
 ## Use
 
@@ -33,6 +33,12 @@ Flutter 3.47.5 is used for this project. From `app/`, run `flutter pub get` and 
 
 The repository does not contain model weights. The app can download Ministral everyday chat, the starter vision model, detailed vision model, Qwen3 VL adult-capable vision model, adult roleplay model, and local speech models in **Models** and **Settings**. Image Studio has its own Core ML image model manager.
 
+## Android preview
+
+From `app/`, run `flutter build apk --release --target-platform android-arm64 --split-per-abi` to make an installable ARM64 APK at `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk`. The current Android build requires Android 9 or newer because of the native llama.cpp library. Install the APK through Android's package installer or `adb install`. It uses an app-owned data directory, Android's system file picker for media and imported GGUF files, and the shared chat, model, profile, and voice settings. The Android launcher is named FluxLira and uses its orange-and-blue icon. A local Android TextToSpeech voice is a fallback if Kokoro synthesis fails; the selected Kokoro voices require the offline speech pack.
+
+This is a preview, not full iOS feature parity. Image Studio is disabled on Android because its current Core ML engine only runs on iPhone. Android model and speech downloads currently require the app to remain open; the iOS background-transfer service does not run on Android. Changing the Home Screen icon is also iPhone-only. The Android release build is signed with the development keystore for sideloading, not a production Play Store key. A successful APK build does not establish chat-model, photo, microphone, Bluetooth, or call-mode behavior on a physical Android phone.
+
 ## Current platforms
 
-iOS is the current release target. It is built and checked on a macOS runner; physical device runtime is pending owner installation. Android work is deferred at the user's request.
+iOS is the current release target. Android has an installable preview build. Physical-device runtime remains a separate acceptance test for both platforms.
