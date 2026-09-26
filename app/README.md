@@ -2,7 +2,7 @@
 
 An offline Flutter chat app focused on iPhone. The app stores chats and imported media on the device. Model and speech downloads are initiated by the user; chat and media analysis do not call a cloud inference service. Fish Audio is an optional online voice service that is off by default.
 
-The orange liquid-glass icon source is in `branding/orange-liquid-glass-master.png`. Run `tools/generate_ios_icons.ps1 -Source branding/orange-liquid-glass-master.png` from the `app` directory to regenerate every iOS icon size. The icon has no wordmark so the app can be renamed later without changing the artwork.
+The current orange and electric-blue liquid-glass icon source is in `branding/orange-blue-liquid-glass-master.png`. Run `tools/generate_ios_icons.ps1 -Source branding/orange-blue-liquid-glass-master.png` from the `app` directory to regenerate every iOS icon size. The earlier orange-only version is also saved in `branding/orange-liquid-glass-master.png`. The icon has no wordmark so the app can be renamed later without changing the artwork.
 
 ## Use
 
