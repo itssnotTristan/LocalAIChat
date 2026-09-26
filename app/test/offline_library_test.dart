@@ -27,6 +27,7 @@ void main() {
       await library.install('survival');
       expect(library.installed, contains('survival'));
       expect(library.search('power outage'), isNotEmpty);
+      expect(library.search('power outage?'), isNotEmpty);
       final reference = library.contextFor(
         'What should I do in a power outage?',
       );

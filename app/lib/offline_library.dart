@@ -219,7 +219,7 @@ class OfflineLibraryRepository {
   List<LibraryHit> search(String query, {bool favoritesOnly = false}) {
     final words = query
         .toLowerCase()
-        .split(RegExp(r'\s+'))
+        .split(RegExp(r'[^a-z0-9]+'))
         .where((word) => word.length > 2);
     final hits = <LibraryHit>[];
     for (final id in bundledPackIds) {
