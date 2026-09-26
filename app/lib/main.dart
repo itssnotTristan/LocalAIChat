@@ -2005,12 +2005,8 @@ class _ChatScreenState extends State<ChatScreen> {
               (!detector.hasSpeech && elapsed > const Duration(seconds: 9)))
             break;
         }
-        final manuallySent = callSendNow;
         callSendNow = false;
-        if (!callActive ||
-            epoch != callEpoch ||
-            callMuted ||
-            (!detector.hasSpeech && !manuallySent)) {
+        if (!callActive || epoch != callEpoch || callMuted) {
           if (service.recording) await service.stopRecording();
           continue;
         }

@@ -46,4 +46,12 @@ void main() {
     expect(detector.add(-75, 2500), false);
     expect(detector.add(-75, 2600), true);
   });
+
+  test('steady background noise does not start a voice turn', () {
+    final detector = VoiceTurnDetector(pauseMilliseconds: 700);
+    for (var step = 0; step < 30; step++) {
+      expect(detector.add(-40, step * 120), false);
+    }
+    expect(detector.hasSpeech, false);
+  });
 }
