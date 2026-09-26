@@ -9,6 +9,7 @@ void main() {
       isVideo: true,
     );
     expect(prompt, contains('actual question'));
+    expect(prompt, contains('user’s text before describing frames'));
     expect(prompt, contains('reaction or opinion'));
     expect(prompt, contains('selected chat personality'));
     expect(prompt, contains('do not claim the frames prove anything unseen'));

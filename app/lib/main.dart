@@ -21,8 +21,10 @@ import 'self_test.dart';
 import 'gguf_info.dart';
 import 'media_viewer.dart';
 import 'media_reply_prompt.dart';
+import 'model_routing.dart';
 import 'model_download.dart';
 import 'reply_quality.dart';
+import 'sensitive_context.dart';
 import 'speech_download.dart';
 import 'video_duration.dart';
 import 'video_sampler.dart';
@@ -79,6 +81,23 @@ Future<void> main(List<String> args) async {
         '${support.path}/keychain-test.json',
       ]);
       exit(0);
+    }
+    final speechMarker = File('${support.path}/run-system-speech-self-test');
+    if (await speechMarker.exists()) {
+      await speechMarker.delete();
+      final report = File('${support.path}/system-speech-test.json');
+      try {
+        await const MethodChannel('local_ai_chat/system_speech')
+            .invokeMethod<void>('speak', {'text': 'Hello.', 'voice': 5})
+            .timeout(const Duration(seconds: 25));
+        await report.writeAsString('{"ok":true}');
+        exit(0);
+      } catch (error) {
+        await report.writeAsString(
+          jsonEncode({'ok': false, 'error': error.toString()}),
+        );
+        exit(2);
+      }
     }
   }
   runApp(const LocalChatApp());
@@ -162,14 +181,20 @@ class ChatEntry {
   );
 }
 
-/// Keep ordinary chat context but exclude captions inferred from old media.
+/// Keep the user's account of earlier media, but do not turn an old model
+/// caption into new evidence. Follow-up questions need the user's prior words.
 List<ChatEntry> textHistorySinceMedia(List<ChatEntry> history) {
-  final lastMedia = history.lastIndexWhere((item) => item.frames.isNotEmpty);
-  final first = lastMedia < 0 ? 0 : (lastMedia + 2).clamp(0, history.length);
-  final textHistory = history.sublist(first);
-  return textHistory.length > 6
-      ? textHistory.sublist(textHistory.length - 6)
-      : textHistory;
+  final kept = <ChatEntry>[];
+  for (var index = 0; index < history.length; index++) {
+    final item = history[index];
+    final isOldMediaCaption =
+        item.role == 'assistant' &&
+        index > 0 &&
+        history[index - 1].role == 'user' &&
+        history[index - 1].frames.isNotEmpty;
+    if (!isOldMediaCaption && item.text.trim().isNotEmpty) kept.add(item);
+  }
+  return kept.length > 8 ? kept.sublist(kept.length - 8) : kept;
 }
 
 bool isMediaFollowup(String text) {
@@ -304,6 +329,18 @@ class _ChatScreenState extends State<ChatScreen> {
         modelPath != autoModelPath) {
       final chosen = models.where((item) => item.path == modelPath).firstOrNull;
       if (chosen?.vision == true) {
+        // A capable instruction-tuned vision model is also a better text chat
+        // model than a creative roleplay fine-tune. Keep the chosen model.
+        if (chosen!.name.contains('Qwen3 VL') ||
+            chosen.name.contains('Qwen3.5')) {
+          return chosen;
+        }
+        for (final model in models) {
+          if (model.vision && model.name.contains('Qwen3 VL')) return model;
+        }
+        for (final model in models) {
+          if (model.vision && model.name.contains('Qwen3.5')) return model;
+        }
         final roleplay = models.where(
           (item) =>
               !item.vision && item.name.toLowerCase().contains('nymphaea'),
@@ -326,10 +363,13 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       } else {
         for (final model in models) {
-          if (!model.vision && model.name.contains('Nymphaea')) return model;
+          if (model.vision && model.name.contains('Qwen3 VL')) return model;
         }
         for (final model in models) {
           if (model.vision && model.name.contains('Qwen3.5')) return model;
+        }
+        for (final model in models) {
+          if (!model.vision && model.name.contains('Nymphaea')) return model;
         }
         for (final model in models) {
           if (!model.vision && model.name.contains('Qwen2.5')) return model;
@@ -1540,6 +1580,21 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     var model = initiallySelectedModel;
+    if (inferenceFrames.isEmpty &&
+        model.name.contains('Nymphaea') &&
+        asksForGroundedAnswer(prompt)) {
+      final general = models.where(
+        (candidate) => candidate.vision && candidate.name.contains('Qwen3 VL'),
+      );
+      final detailed = models.where(
+        (candidate) => candidate.vision && candidate.name.contains('Qwen3.5'),
+      );
+      if (general.isNotEmpty) {
+        model = general.first;
+      } else if (detailed.isNotEmpty) {
+        model = detailed.first;
+      }
+    }
     if (inferenceFrames.isNotEmpty && !model.vision) {
       final adultVision = models.where(
         (candidate) => candidate.vision && candidate.name.contains('Qwen3 VL'),
@@ -1635,14 +1690,37 @@ class _ChatScreenState extends State<ChatScreen> {
       // A text-only model cannot inspect previous media. Do not feed it an
       // earlier vision answer as if it were fresh visual evidence.
       final recent = textHistorySinceMedia(history);
-      for (final item in inferenceFrames.isEmpty ? recent : <ChatEntry>[]) {
-        final text = item.text.length > 900
-            ? item.text.substring(0, 900)
+      final sensitiveReply = sensitiveContextReply(
+        question.text,
+        recent.where((item) => item.role == 'user').map((item) => item.text),
+      );
+      if (sensitiveReply != null) {
+        if (mounted)
+          setState(() {
+            reply.text = sensitiveReply;
+            status = 'Ready';
+          });
+        await speakReplyIfEnabled(reply.text, speakOnComplete: speakOnComplete);
+        return;
+      }
+      final contextualHistory = inferenceFrames.isNotEmpty && recent.length > 4
+          ? recent.sublist(recent.length - 4)
+          : recent;
+      final historyLimit = inferenceFrames.isNotEmpty ? 350 : 900;
+      for (final item in contextualHistory) {
+        final text = item.text.length > historyLimit
+            ? item.text.substring(0, historyLimit)
             : item.text;
         input.add(
           LlamaResponseInputItem(
             role: item.role,
-            content: [LlamaTextPart(text)],
+            content: [
+              LlamaTextPart(
+                item.frames.isNotEmpty
+                    ? '$text\n[An image or video was attached to this earlier message; its pixels are not included here.]'
+                    : text,
+              ),
+            ],
           ),
         );
       }
@@ -1701,7 +1779,7 @@ class _ChatScreenState extends State<ChatScreen> {
           models: {
             'active': LlamaModelConfig(
               modelPath: model.path,
-              mmprojPath: model.projector,
+              mmprojPath: inferenceFrames.isNotEmpty ? model.projector : null,
               contextSize: attempt.contextSize,
               gpuLayerCount: attempt.gpuLayers,
               mmprojUseGpu: attempt.projectorOnGpu,
@@ -1854,33 +1932,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     '${firstWordAt == null ? '' : ' · first word ${firstWordAt.inSeconds}s'}',
         );
       }
-      if (!cancelled &&
-          speakOnComplete &&
-          autoSpeak &&
-          reply.text.isNotEmpty &&
-          !reply.text.startsWith('[')) {
-        final epoch = voiceEpoch;
-        try {
-          final service = speech;
-          if (service == null) {
-            throw StateError('Set up speech in Voice settings.');
-          }
-          if (mounted) setState(() => status = 'Preparing voice reply…');
-          final audioPath = await synthesizeReply(reply.text);
-          if (cancelled || epoch != voiceEpoch) {
-            final file = File(audioPath);
-            if (await file.exists()) await file.delete();
-          } else {
-            if (mounted) setState(() => status = 'Speaking…');
-            await service.playFile(audioPath);
-            if (mounted && !cancelled) setState(() => status = 'Ready');
-          }
-        } catch (error) {
-          if (mounted && !cancelled) {
-            setState(() => status = 'Voice failed: $error');
-          }
-        }
-      }
+      await speakReplyIfEnabled(reply.text, speakOnComplete: speakOnComplete);
     } catch (error) {
       if (cancelled) {
         if (reply.text.isEmpty) reply.text = '[Stopped]';
@@ -1908,6 +1960,44 @@ class _ChatScreenState extends State<ChatScreen> {
       if (identical(activeGeneration, cancellation)) activeGeneration = null;
       if (mounted) setState(() => busy = false);
       await save();
+    }
+  }
+
+  Future<void> speakReplyIfEnabled(
+    String reply, {
+    required bool speakOnComplete,
+  }) async {
+    if (cancelled ||
+        !speakOnComplete ||
+        !autoSpeak ||
+        reply.isEmpty ||
+        reply.startsWith('['))
+      return;
+    final epoch = voiceEpoch;
+    try {
+      final service = speech;
+      if (service == null) throw StateError('Set up speech in Voice settings.');
+      if (mounted) setState(() => status = 'Preparing voice reply…');
+      final audioPath = await synthesizeReply(reply);
+      if (cancelled || epoch != voiceEpoch) {
+        if (!SpeechService.isSystemSpeechPath(audioPath)) {
+          final file = File(audioPath);
+          if (await file.exists()) await file.delete();
+        }
+      } else {
+        if (mounted) {
+          setState(
+            () => status = SpeechService.isSystemSpeechPath(audioPath)
+                ? 'Speaking with iPhone voice…'
+                : 'Speaking…',
+          );
+        }
+        await service.playFile(audioPath);
+        if (mounted && !cancelled) setState(() => status = 'Ready');
+      }
+    } catch (error) {
+      if (mounted && !cancelled)
+        setState(() => status = 'Voice failed: $error');
     }
   }
 
@@ -2077,8 +2167,10 @@ class _ChatScreenState extends State<ChatScreen> {
             : 'Preparing ${SpeechService.voices.firstWhere((item) => item.id == selectedVoice).name}…';
         final wav = await synthesizeReply(answer.text);
         if (!callActive || epoch != callEpoch) {
-          final file = File(wav);
-          if (await file.exists()) await file.delete();
+          if (!SpeechService.isSystemSpeechPath(wav)) {
+            final file = File(wav);
+            if (await file.exists()) await file.delete();
+          }
           continue;
         }
         callStatus.value = 'Speaking…';
@@ -2521,9 +2613,9 @@ class _ChatScreenState extends State<ChatScreen> {
                             update(() => replyStyle = value ?? replyStyle),
                       ),
                       SwitchListTile(
-                        title: const Text('Use a chat model for text'),
+                        title: const Text('Use a stronger model for text'),
                         subtitle: const Text(
-                          'Keeps the vision model for photos and videos; uses an installed chat model for text and roleplay.',
+                          'Uses an installed general chat model for text when the selected vision model is small. Select the roleplay model directly when you want it.',
                         ),
                         value: autoTextRouting,
                         onChanged: (value) =>

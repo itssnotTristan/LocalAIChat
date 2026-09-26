@@ -1,5 +1,82 @@
 import Flutter
 import UIKit
+import AVFoundation
+
+// When the larger Kokoro model cannot allocate on iPhone, use an installed
+// iOS voice so an otherwise successful chat reply still speaks out loud.
+final class SystemSpeechBridge: NSObject, AVSpeechSynthesizerDelegate {
+  private let synthesizer = AVSpeechSynthesizer()
+  private var pending: FlutterResult?
+  private var activeUtterance: AVSpeechUtterance?
+
+  override init() {
+    super.init()
+    synthesizer.delegate = self
+  }
+
+  func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    switch call.method {
+    case "speak":
+      guard let arguments = call.arguments as? [String: Any],
+            let text = arguments["text"] as? String,
+            !text.isEmpty else {
+        result(FlutterError(code: "speech_text", message: "There is no text to speak.", details: nil))
+        return
+      }
+      let previous = pending
+      pending = nil
+      activeUtterance = nil
+      if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
+      previous?(nil)
+      pending = result
+      let voiceId = arguments["voice"] as? Int ?? 5
+      let utterance = AVSpeechUtterance(string: text)
+      let english = AVSpeechSynthesisVoice.speechVoices()
+        .filter { $0.language.hasPrefix("en") }
+        .sorted { $0.identifier < $1.identifier }
+      let female = english.filter { $0.gender == .female }
+      let male = english.filter { $0.gender == .male }
+      let isFemale = voiceId == 1 || voiceId == 7
+      let preferred = isFemale ? female : male
+      let index = switch voiceId {
+      case 6, 7: 1
+      case 9: 2
+      default: 0
+      }
+      utterance.voice = preferred.isEmpty
+        ? (english.first ?? AVSpeechSynthesisVoice(language: "en-US"))
+        : preferred[index % preferred.count]
+      utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+      activeUtterance = utterance
+      synthesizer.speak(utterance)
+    case "stop":
+      let previous = pending
+      pending = nil
+      activeUtterance = nil
+      if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
+      previous?(nil)
+      result(nil)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                         didFinish utterance: AVSpeechUtterance) {
+    guard utterance === activeUtterance else { return }
+    pending?(nil)
+    pending = nil
+    activeUtterance = nil
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                         didCancel utterance: AVSpeechUtterance) {
+    guard utterance === activeUtterance else { return }
+    pending?(nil)
+    pending = nil
+    activeUtterance = nil
+  }
+}
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -13,6 +90,14 @@ import UIKit
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     let imageStudioBridge = ImageStudioBridge()
+    let systemSpeechBridge = SystemSpeechBridge()
+    let speechChannel = FlutterMethodChannel(
+      name: "local_ai_chat/system_speech",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    speechChannel.setMethodCallHandler { call, result in
+      systemSpeechBridge.handle(call, result: result)
+    }
     let imageStudioChannel = FlutterMethodChannel(
       name: "local_ai_chat/image_studio",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()

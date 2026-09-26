@@ -88,6 +88,14 @@ jobs:
           done
           cat "$container/Library/Application Support/keychain-test.json"
           grep -q '"ok":true' "$container/Library/Application Support/keychain-test.json"
+          touch "$container/Library/Application Support/run-system-speech-self-test"
+          xcrun simctl launch "$simulator" com.localai.localAiChat
+          for attempt in $(seq 1 35); do
+            if [ -f "$container/Library/Application Support/system-speech-test.json" ]; then break; fi
+            sleep 1
+          done
+          cat "$container/Library/Application Support/system-speech-test.json"
+          grep -q '"ok":true' "$container/Library/Application Support/system-speech-test.json"
           xcrun simctl launch "$simulator" com.localai.localAiChat
           sleep 5
           xcrun simctl io "$simulator" screenshot iphone-preview.png

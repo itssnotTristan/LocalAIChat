@@ -27,7 +27,7 @@ void main() {
     expect(restored.entries.first.playbackPath, 'playback.mp4');
   });
 
-  test('text history drops an old video caption but keeps new chat', () {
+  test('text history keeps user context but drops an old video caption', () {
     final history = [
       ChatEntry('user', 'How are you?'),
       ChatEntry('assistant', 'Good.'),
@@ -37,8 +37,26 @@ void main() {
       ChatEntry('assistant', 'Okay, green.'),
     ];
     expect(textHistorySinceMedia(history).map((entry) => entry.text), [
+      'How are you?',
+      'Good.',
+      'Describe this clip',
       'My card is green.',
       'Okay, green.',
+    ]);
+  });
+
+  test('follow-up can see the prior user message after an attachment', () {
+    final history = [
+      ChatEntry('user', 'My friend is asleep on the sofa.', [
+        MediaFrame('a.jpg'),
+      ]),
+      ChatEntry('assistant', 'A room is visible.'),
+      ChatEntry('user', 'Why is she there?'),
+    ];
+    final kept = textHistorySinceMedia(history);
+    expect(kept.map((entry) => entry.text), [
+      'My friend is asleep on the sofa.',
+      'Why is she there?',
     ]);
   });
 }

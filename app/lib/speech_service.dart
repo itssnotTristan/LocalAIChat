@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/services.dart';
 import 'package:record/record.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 
@@ -14,6 +15,9 @@ class SpeechService {
   bool recording = false;
   bool speaking = false;
   Completer<void>? _playStopped;
+  static const _systemSpeech = MethodChannel('local_ai_chat/system_speech');
+  static bool isSystemSpeechPath(String path) =>
+      Uri.tryParse(path)?.scheme == 'system-speech';
 
   static const voices = <({String name, String gender, int id})>[
     (name: 'Adam', gender: 'Male', id: 5),
@@ -130,9 +134,25 @@ class SpeechService {
     }
   }
 
-  Future<String> synthesize(String text, String outputPath, {int voiceId = 5}) {
+  Future<String> synthesize(
+    String text,
+    String outputPath, {
+    int voiceId = 5,
+  }) async {
     final rootPath = root;
-    return Isolate.run(() => _synthesize(rootPath, text, outputPath, voiceId));
+    try {
+      return await Isolate.run(
+        () => _synthesize(rootPath, text, outputPath, voiceId),
+      );
+    } catch (_) {
+      // Kokoro may fail to allocate after a large iPhone chat model. Keep
+      // speech entirely on the device using the system's installed voices.
+      if (!Platform.isIOS) rethrow;
+      return Uri(
+        scheme: 'system-speech',
+        queryParameters: {'text': text, 'voice': '$voiceId'},
+      ).toString();
+    }
   }
 
   static String _synthesize(
@@ -175,6 +195,19 @@ class SpeechService {
   }
 
   Future<void> playFile(String path) async {
+    if (isSystemSpeechPath(path)) {
+      final parameters = Uri.parse(path).queryParameters;
+      speaking = true;
+      try {
+        await _systemSpeech.invokeMethod<void>('speak', {
+          'text': parameters['text'] ?? '',
+          'voice': int.tryParse(parameters['voice'] ?? '') ?? 5,
+        });
+      } finally {
+        speaking = false;
+      }
+      return;
+    }
     await player.stop();
     _playStopped = Completer<void>();
     speaking = true;
@@ -200,6 +233,9 @@ class SpeechService {
     if (_playStopped != null && !_playStopped!.isCompleted)
       _playStopped!.complete();
     await player.stop();
+    if (Platform.isIOS) {
+      await _systemSpeech.invokeMethod<void>('stop');
+    }
     speaking = false;
   }
 
