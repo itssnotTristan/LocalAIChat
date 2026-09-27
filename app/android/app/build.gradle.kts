@@ -9,6 +9,14 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    // This sideloaded build includes Flutter and llama.cpp only for ARM.
+    // Do not advertise x86 support just because another plugin ships x86 .so files.
+    packaging {
+        jniLibs {
+            excludes += setOf("**/x86/**", "**/x86_64/**")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

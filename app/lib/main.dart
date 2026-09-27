@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -9,7 +10,7 @@ import 'package:lib_llama_cpp/lib_llama_cpp.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import 'app_icon.dart';
+import 'app_issue.dart';
 import 'glass_design.dart';
 import 'inference_profile.dart';
 import 'inference_attempt.dart';
@@ -101,6 +102,38 @@ Future<void> main(List<String> args) async {
         await const MethodChannel('local_ai_chat/system_speech')
             .invokeMethod<void>('speak', {'text': 'Hello.', 'voice': 5})
             .timeout(const Duration(seconds: 25));
+        // Exercise the same audio player and session route used by ordinary
+        // Fish replies without requiring a Fish account in CI.
+        final wav = File('${support.path}/audio-route-smoke.wav');
+        final samples = Uint8List(16000);
+        final header = ByteData(44);
+        void tag(int offset, String value) {
+          for (var i = 0; i < value.length; i++) {
+            header.setUint8(offset + i, value.codeUnitAt(i));
+          }
+        }
+
+        tag(0, 'RIFF');
+        header.setUint32(4, 36 + samples.length, Endian.little);
+        tag(8, 'WAVE');
+        tag(12, 'fmt ');
+        header.setUint32(16, 16, Endian.little);
+        header.setUint16(20, 1, Endian.little);
+        header.setUint16(22, 1, Endian.little);
+        header.setUint32(24, 16000, Endian.little);
+        header.setUint32(28, 32000, Endian.little);
+        header.setUint16(32, 2, Endian.little);
+        header.setUint16(34, 16, Endian.little);
+        tag(36, 'data');
+        header.setUint32(40, samples.length, Endian.little);
+        await wav.writeAsBytes([...header.buffer.asUint8List(), ...samples]);
+        final player = SpeechService(support.path);
+        try {
+          await player.playFile(wav.path).timeout(const Duration(seconds: 10));
+        } finally {
+          await player.dispose();
+          if (await wav.exists()) await wav.delete();
+        }
         await report.writeAsString('{"ok":true}');
         exit(0);
       } catch (error) {
@@ -512,11 +545,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   void showProblem(String message) {
     if (!mounted) return;
-    setState(() => status = message);
+    final readable = RegExp(r'^[A-Z]+-\d{3}\b').hasMatch(message)
+        ? message
+        : 'APP-400 · $message';
+    setState(() => status = readable);
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(SnackBar(content: Text(message)));
+    messenger.showSnackBar(
+      SnackBar(content: Text(readable), duration: const Duration(seconds: 8)),
+    );
   }
+
+  void showNotice(String message) {
+    if (!mounted) return;
+    setState(() => status = message);
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String explain(Object error, IssueArea area) =>
+      AppIssue.from(error, area: area).display;
 
   @override
   void initState() {
@@ -559,7 +607,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       await syncBackgroundDownloads();
     } catch (error) {
-      if (mounted) showProblem('Could not queue ${pack.name}: $error');
+      if (mounted) showProblem(explain(error, IssueArea.download));
     }
   }
 
@@ -714,7 +762,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         backgroundTransfers.value = await backgroundDownloads.statuses();
       }
     } catch (error) {
-      if (mounted) setState(() => status = 'Background model check: $error');
+      if (mounted) setState(() => status = explain(error, IssueArea.download));
     } finally {
       syncingBackgroundDownloads = false;
     }
@@ -757,8 +805,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
       await save();
     } catch (error) {
-      if (mounted)
-        setState(() => status = 'Model download: ' + error.toString());
+      if (mounted) setState(() => status = explain(error, IssueArea.download));
     } finally {
       if (mounted) setState(() => downloading = false);
     }
@@ -812,7 +859,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         );
       await save();
     } catch (error) {
-      if (mounted) showProblem('Everyday model download failed: $error');
+      if (mounted) showProblem(explain(error, IssueArea.download));
     } finally {
       if (mounted) setState(() => downloading = false);
     }
@@ -862,7 +909,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
       await save();
     } catch (error) {
-      if (mounted) showProblem('Model download failed: $error');
+      if (mounted) showProblem(explain(error, IssueArea.download));
     } finally {
       if (mounted) setState(() => downloading = false);
     }
@@ -903,7 +950,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       setState(() => status = 'Roleplay model passed SHA-256 verification.');
       await save();
     } catch (error) {
-      if (mounted) showProblem('Roleplay model download failed: $error');
+      if (mounted) showProblem(explain(error, IssueArea.download));
     } finally {
       if (mounted) setState(() => downloading = false);
     }
@@ -956,7 +1003,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         );
       await save();
     } catch (error) {
-      if (mounted) showProblem('Vision model download failed: $error');
+      if (mounted) showProblem(explain(error, IssueArea.download));
     } finally {
       if (mounted) setState(() => downloading = false);
     }
@@ -983,7 +1030,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         }
         await syncBackgroundDownloads();
       } catch (error) {
-        if (mounted) showProblem('Could not queue voice pack: $error');
+        if (mounted) showProblem(explain(error, IssueArea.download));
       }
       return;
     }
@@ -1011,8 +1058,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           () => status = 'Offline speech recognition and voice are ready.',
         );
     } catch (error) {
-      if (mounted)
-        setState(() => status = 'Speech download failed: ' + error.toString());
+      if (mounted) setState(() => status = explain(error, IssueArea.download));
     } finally {
       if (mounted) setState(() => downloadingSpeech = false);
     }
@@ -1313,7 +1359,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (mounted)
         setState(() {
           dataLoaded = true;
-          loadError = 'Could not load local data: $error';
+          loadError = explain(error, IssueArea.app);
           status = loadError!;
         });
     }
@@ -1491,7 +1537,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           : 'Look again at this video and describe the visible action.';
     });
     await save();
-    showProblem('Media ready. Edit the question or send it again.');
+    showNotice('Media ready. Edit the question or send it again.');
   }
 
   Future<void> deleteUnreferencedMedia(List<String> paths) async {
@@ -1721,7 +1767,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
       await save();
     } catch (error) {
-      setState(() => status = 'Model import failed: ' + error.toString());
+      setState(() => status = explain(error, IssueArea.model));
     }
   }
 
@@ -1751,8 +1797,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ),
       );
     } catch (error) {
-      if (mounted)
-        setState(() => status = 'Could not inspect GGUF: ' + error.toString());
+      if (mounted) setState(() => status = explain(error, IssueArea.model));
     }
   }
 
@@ -1852,7 +1897,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       setState(() => attachments.add(MediaFrame(ready)));
       await save();
     } catch (error) {
-      showProblem('Image import failed: $error');
+      showProblem(explain(error, IssueArea.media));
     }
   }
 
@@ -1907,7 +1952,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         final file = File(candidate);
         if (await file.exists()) await file.delete();
       }
-      showProblem('Video import failed: $error');
+      showProblem(explain(error, IssueArea.media));
     } finally {
       if (mounted) setState(() => samplingVideo = false);
     }
@@ -1938,7 +1983,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               if (dialogContext.mounted) update(() => previewPath = frame.path);
             } catch (error) {
               if (dialogContext.mounted)
-                showProblem('Frame preview failed: $error');
+                showProblem(explain(error, IssueArea.media));
             } finally {
               if (dialogContext.mounted) update(() => loading = false);
             }
@@ -1999,7 +2044,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           if (dialogContext.mounted)
                             Navigator.pop(dialogContext);
                         } catch (error) {
-                          showProblem('Could not add frame: $error');
+                          showProblem(explain(error, IssueArea.media));
                         }
                       },
                 child: const Text('Add frame'),
@@ -2133,7 +2178,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     if (!await File(model.path).exists()) {
-      showProblem('The selected model file is missing: ${model.path}');
+      showProblem(
+        'MODEL-404 · The selected model file is missing. Download or import it again. Your draft is saved.',
+      );
       return;
     }
     if (model.vision && !await File(model.projector!).exists()) {
@@ -2576,12 +2623,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       currentVideoPath = originalVideoPath;
       currentVideoPlaybackPath = originalVideoPlaybackPath;
       currentVideoDurationMs = originalVideoDurationMs;
-      final message = isContextMemoryFailure(error)
-          ? '${model.name} could not fit in device memory, even after a smaller retry. Close other apps, choose Quick mode or a smaller vision model, then send again. Your draft and media are saved.'
-          : error.toString().contains('Failed to load model:')
-          ? 'Could not load ${model.name}. Close other apps and retry; if it keeps failing, remove and download or import that model again. Your draft is saved.'
-          : 'Local generation failed: $error';
-      showProblem(message);
+      showProblem(
+        '${explain(error, IssueArea.model)} Your draft and media are saved.',
+      );
     } finally {
       for (final path in preparedInferenceFiles) {
         final file = File(path);
@@ -2639,8 +2683,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         if (mounted && !cancelled) setState(() => status = 'Ready');
       }
     } catch (error) {
-      if (mounted && !cancelled)
-        setState(() => status = 'Voice failed: $error');
+      if (mounted && !cancelled) {
+        showProblem(explain(error, IssueArea.voice));
+      }
     }
   }
 
@@ -2700,8 +2745,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         await service.playFile(wav, playbackRate: voicePlaybackRate);
         if (mounted && epoch == voiceEpoch) setState(() => status = 'Ready');
       } catch (error) {
-        if (mounted)
-          setState(() => status = 'Voice failed: ' + error.toString());
+        if (mounted) showProblem(explain(error, IssueArea.voice));
       } finally {
         if (mounted) setState(() => voiceWorking = false);
       }
@@ -2733,8 +2777,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           status = 'Listening on this device. Tap microphone to send.';
         });
     } catch (error) {
-      if (mounted)
-        setState(() => status = 'Microphone failed: ' + error.toString());
+      if (mounted) showProblem(explain(error, IssueArea.microphone));
     }
   }
 
@@ -2756,6 +2799,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     String reply, {
     required bool Function() shouldContinue,
     Future<void> Function()? onFirstReady,
+    bool keepMicrophoneRoute = false,
   }) async {
     final service = speech;
     if (service == null || dataDir == null) {
@@ -2821,7 +2865,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           return;
         }
         if (index + 1 < parts.length) following = prepareFollowing(index + 1);
-        await service.playFile(path, playbackRate: rate);
+        await service.playFile(
+          path,
+          playbackRate: rate,
+          keepMicrophoneRoute: keepMicrophoneRoute,
+        );
       } catch (_) {
         discardWhenReady(following);
         final file = File(path);
@@ -2954,8 +3002,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         shouldContinue: () =>
                             !replyCancelled && callActive && epoch == callEpoch,
                         onFirstReady: beginPlayback,
+                        keepMicrophoneRoute: true,
                       )
-                    : service.playFile(wav!, playbackRate: voicePlaybackRate))
+                    : service.playFile(
+                        wav!,
+                        playbackRate: voicePlaybackRate,
+                        keepMicrophoneRoute: true,
+                      ))
                 .whenComplete(() => playbackFinished = true);
         final bargeDetector = VoiceBargeInDetector();
         var interrupted = false;
@@ -3002,7 +3055,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           } catch (_) {}
         }
         if (!callActive || epoch != callEpoch) break;
-        callStatus.value = 'Call error: $error';
+        callStatus.value = explain(error, IssueArea.voice);
         await Future.delayed(const Duration(seconds: 2));
       }
     }
@@ -3173,7 +3226,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (mounted) setState(() => attachments.add(MediaFrame(owned)));
       await save();
     } catch (error) {
-      showProblem('Could not attach edited photo: $error');
+      showProblem(explain(error, IssueArea.media));
     }
   }
 
@@ -3439,7 +3492,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                           ? '${(transfer.received / 1048576).round()} MiB downloaded'
                                           : transfer.state == 'downloaded'
                                           ? 'Downloaded · checking checksum when open'
-                                          : '${transfer.state}${transfer.error.isEmpty ? '' : ': ${transfer.error}'}',
+                                          : transfer.state == 'failed'
+                                          ? AppIssue.from(
+                                              StateError(transfer.error),
+                                              area: IssueArea.download,
+                                            ).display
+                                          : transfer.state,
                                     ),
                                     if (transfer.state == 'downloading')
                                       LinearProgressIndicator(value: progress),
@@ -3474,15 +3532,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> showSettings() async {
-    var iconSupported = false;
-    var currentIcon = AppIconChoice.plasma;
-    try {
-      iconSupported = await AppIconService.supported;
-      if (iconSupported) currentIcon = await AppIconService.current();
-    } catch (_) {
-      iconSupported = false;
-    }
-    if (!mounted) return;
     final promptController = TextEditingController(text: instructions);
     final speechController = TextEditingController(text: speechRoot ?? '');
     var selectedCustom = customColor;
@@ -3515,7 +3564,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     var selectedStyle = backgroundStyle;
     var selectedPhotoPath = backgroundImagePath;
     var selectedPhotoDim = backgroundPhotoDim;
-    var selectedIcon = currentIcon;
     var animated = motion;
     var speed = motionSpeed;
     var spokenReplies = autoSpeak;
@@ -3530,7 +3578,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       keySaved = await FishVoice.hasKey;
       fishHasKey = keySaved;
     } catch (error) {
-      fishKeyStatus = 'Could not read the saved Fish Audio key: $error';
+      fishKeyStatus = explain(error, IssueArea.fish);
     }
     if (!mounted) return;
     var fishTestStatus = '';
@@ -3631,55 +3679,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     subtitle: Text('$selectedTheme · $selectedStyle'),
                     children: [
                       const SizedBox(height: 8),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          'App icon',
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: AppIconChoice.values.map((choice) {
-                          final selected = choice == selectedIcon;
-                          return OutlinedButton(
-                            onPressed: iconSupported
-                                ? () => update(() => selectedIcon = choice)
-                                : null,
-                            style: OutlinedButton.styleFrom(
-                              side: selected
-                                  ? BorderSide(
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .primary,
-                                      width: 2,
-                                    )
-                                  : null,
-                            ),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(14),
-                                  child: Image.asset(
-                                    choice.previewAsset,
-                                    width: 52,
-                                    height: 52,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(choice.label),
-                              ],
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                      if (!iconSupported)
-                        const Text(
-                          'Home Screen icon changes are available on iPhone.',
-                        ),
                       DropdownButtonFormField<String>(
                         initialValue: selectedTheme,
                         decoration: const InputDecoration(
@@ -4251,8 +4250,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             } catch (error) {
                               if (!context.mounted) return;
                               update(
-                                () => fishKeyStatus =
-                                    'Could not save Fish voice: $error',
+                                () => fishKeyStatus = explain(
+                                  error,
+                                  IssueArea.fish,
+                                ),
                               );
                             }
                           },
@@ -4316,8 +4317,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             } catch (error) {
                               if (!context.mounted) return;
                               update(
-                                () => fishTestStatus =
-                                    'Voice test failed: $error',
+                                () => fishTestStatus = explain(
+                                  error,
+                                  IssueArea.fish,
+                                ),
                               );
                             }
                           },
@@ -4340,8 +4343,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               } catch (error) {
                                 if (!context.mounted) return;
                                 update(
-                                  () => fishKeyStatus =
-                                      'Could not remove Fish Audio key: $error',
+                                  () => fishKeyStatus = explain(
+                                    error,
+                                    IssueArea.fish,
+                                  ),
                                 );
                               }
                             },
@@ -4387,9 +4392,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           fishHasKey = await FishVoice.hasKey;
                         } catch (error) {
                           if (mounted)
-                            showProblem(
-                              'Could not save Fish Audio key securely: $error',
-                            );
+                            showProblem(explain(error, IssueArea.fish));
                           return;
                         }
                       }
@@ -4402,9 +4405,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           );
                         } catch (error) {
                           if (mounted)
-                            showProblem(
-                              'Could not add background photo: $error',
-                            );
+                            showProblem(explain(error, IssueArea.media));
                           return;
                         }
                       }
@@ -4447,16 +4448,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         await save();
                         await deleteOldBackgroundPhoto(oldPhotoPath);
                       } catch (error) {
-                        if (mounted)
-                          showProblem('Could not save appearance: $error');
-                      }
-                      if (iconSupported && selectedIcon != currentIcon) {
-                        try {
-                          await AppIconService.set(selectedIcon);
-                        } catch (error) {
-                          if (mounted)
-                            showProblem('Could not change app icon: $error');
-                        }
+                        if (mounted) showProblem(explain(error, IssueArea.app));
                       }
                     },
               child: const Text('Save'),
@@ -4762,9 +4754,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       ListTile(
                         leading: const Icon(Icons.auto_fix_high),
                         title: const Text('Image Studio'),
-                        subtitle: Text(Platform.isAndroid
-                            ? 'Image editing is coming to Android'
-                            : 'Edit photos locally'),
+                        subtitle: Text(
+                          Platform.isAndroid
+                              ? 'Image editing is coming to Android'
+                              : 'Edit photos locally',
+                        ),
                         onTap: busy || callActive || Platform.isAndroid
                             ? null
                             : () {

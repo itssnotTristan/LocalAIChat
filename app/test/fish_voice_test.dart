@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:local_ai_chat/fish_voice.dart';
+import 'package:local_ai_chat/app_issue.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -50,7 +51,12 @@ void main() {
           .setMockMethodCallHandler(channel, null),
     );
 
-    expect(FishVoice.saveKey('test-secret'), throwsStateError);
+    expect(
+      FishVoice.saveKey('test-secret'),
+      throwsA(
+        isA<AppIssue>().having((issue) => issue.code, 'code', 'FISH-103'),
+      ),
+    );
   });
 
   test('Fish replies split into shorter complete speech segments', () {
@@ -96,4 +102,33 @@ void main() {
     );
     expect(FishVoice.performanceText('Hello!', 'Default'), 'Hello!');
   });
+
+  test('Fish failures identify account, voice, and service problems', () {
+    expect(AppIssue.fishHttp(401).code, 'FISH-401');
+    expect(AppIssue.fishHttp(404).display, contains('voice ID'));
+    expect(AppIssue.fishHttp(429).display, contains('request limit'));
+    expect(AppIssue.fishHttp(503).code, 'FISH-503');
+  });
+
+  test('Fish voice playback accepts MP3 and rejects text responses', () {
+    expect(FishVoice.hasMp3Header([0x49, 0x44, 0x33]), isTrue);
+    expect(FishVoice.hasMp3Header([0xff, 0xfb, 0x90]), isTrue);
+    expect(FishVoice.hasMp3Header('{"e'.codeUnits), isFalse);
+  });
+
+  test(
+    'audio-session errors explain playback without exposing raw details',
+    () {
+      final issue = AppIssue.from(
+        PlatformException(
+          code: 'DarwinAudioError',
+          message: 'Error configuring audio session: secret-device-path',
+        ),
+        area: IssueArea.voice,
+      );
+      expect(issue.code, 'VOICE-201');
+      expect(issue.display, contains('playback did not start'));
+      expect(issue.display, isNot(contains('secret-device-path')));
+    },
+  );
 }

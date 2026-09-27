@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import 'user_profile.dart';
+import 'app_issue.dart';
 
 class UserProfilePage extends StatefulWidget {
   const UserProfilePage({
@@ -113,7 +114,9 @@ class _UserProfilePageState extends State<UserProfilePage> {
       if (mounted && !widget.firstRun) Navigator.of(context).pop();
     } catch (failure) {
       if (mounted)
-        setState(() => error = 'Could not save your profile: $failure');
+        setState(
+          () => error = AppIssue.from(failure, area: IssueArea.profile).display,
+        );
     } finally {
       if (mounted) setState(() => saving = false);
     }
@@ -261,8 +264,10 @@ class _UserProfilePageState extends State<UserProfilePage> {
                           } catch (failure) {
                             if (mounted) {
                               setState(
-                                () => error =
-                                    'Could not delete your profile: $failure',
+                                () => error = AppIssue.from(
+                                  failure,
+                                  area: IssueArea.profile,
+                                ).display,
                               );
                             }
                           } finally {

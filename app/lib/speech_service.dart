@@ -218,7 +218,11 @@ class SpeechService {
     }
   }
 
-  Future<void> playFile(String path, {double playbackRate = 1.0}) async {
+  Future<void> playFile(
+    String path, {
+    double playbackRate = 1.0,
+    bool keepMicrophoneRoute = false,
+  }) async {
     if (isSystemSpeechPath(path)) {
       final parameters = Uri.parse(path).queryParameters;
       speaking = true;
@@ -233,26 +237,30 @@ class SpeechService {
       }
       return;
     }
-    await player.stop();
-    if (Platform.isIOS) {
-      // Keep the microphone route active while the reply plays so a caller
-      // can interrupt without restarting the audio session.
-      await player.setAudioContext(
-        AudioContext(
-          iOS: AudioContextIOS(
-            category: AVAudioSessionCategory.playAndRecord,
-            options: {
-              AVAudioSessionOptions.defaultToSpeaker,
-              AVAudioSessionOptions.allowBluetooth,
-              AVAudioSessionOptions.allowBluetoothA2DP,
-            },
-          ),
-        ),
-      );
-    }
     _playStopped = Completer<void>();
     speaking = true;
     try {
+      await player.stop();
+      if (Platform.isIOS) {
+        // iOS makes this a global session change. Ordinary Fish and local TTS
+        // playback must use playback only; playAndRecord is reserved for calls
+        // where the microphone is listening for an interruption.
+        await player.setAudioContext(
+          AudioContext(
+            iOS: AudioContextIOS(
+              category: keepMicrophoneRoute
+                  ? AVAudioSessionCategory.playAndRecord
+                  : AVAudioSessionCategory.playback,
+              options: keepMicrophoneRoute
+                  ? {
+                      AVAudioSessionOptions.defaultToSpeaker,
+                      AVAudioSessionOptions.allowBluetooth,
+                    }
+                  : const {},
+            ),
+          ),
+        );
+      }
       final completed = player.onPlayerComplete.first;
       await player.play(DeviceFileSource(path));
       await player.setPlaybackRate(playbackRate.clamp(0.5, 2.0));
@@ -260,7 +268,11 @@ class SpeechService {
     } finally {
       speaking = false;
       _playStopped = null;
-      await player.stop();
+      try {
+        await player.stop();
+      } catch (_) {
+        // Preserve the original playback error for the caller.
+      }
       final file = File(path);
       if (await file.exists()) {
         try {

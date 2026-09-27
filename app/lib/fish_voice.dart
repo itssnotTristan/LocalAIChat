@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'speech_text.dart';
+import 'app_issue.dart';
 
 /// Optional cloud speech. Local chat and transcription never use this service.
 class FishVoice {
@@ -55,17 +57,30 @@ class FishVoice {
 
   static Future<void> saveKey(String key) async {
     final value = key.trim();
-    if (value.isEmpty) {
-      await _store.delete(key: _keyName);
-    } else {
-      await _store.write(key: _keyName, value: value);
-      // Some iOS signing and Keychain configurations report a successful
-      // write without making the value available to a subsequent read.
-      if (await _store.read(key: _keyName) != value) {
-        throw StateError(
-          'The key was not retained by device secure storage. Check the app storage configuration.',
-        );
+    try {
+      if (value.isEmpty) {
+        await _store.delete(key: _keyName);
+      } else {
+        await _store.write(key: _keyName, value: value);
+        // Verify that the iOS Keychain or Android secure storage retained it.
+        if (await _store.read(key: _keyName) != value) {
+          throw const AppIssue(
+            'FISH-103',
+            'The Fish Audio key was not saved.',
+            'Secure storage did not retain the value after writing it.',
+            'Restart the app and save the key again.',
+          );
+        }
       }
+    } on AppIssue {
+      rethrow;
+    } catch (_) {
+      throw const AppIssue(
+        'FISH-103',
+        'The Fish Audio key could not be saved.',
+        'Device secure storage returned an error.',
+        'Restart the app and save the key again.',
+      );
     }
   }
 
@@ -93,67 +108,131 @@ class FishVoice {
     return chunks;
   }
 
+  static bool hasMp3Header(List<int> firstBytes) =>
+      firstBytes.length >= 3 &&
+      (firstBytes[0] == 0x49 &&
+              firstBytes[1] == 0x44 &&
+              firstBytes[2] == 0x33 ||
+          firstBytes[0] == 0xff && (firstBytes[1] & 0xe0) == 0xe0);
+
   static Future<String> synthesize(
     String text,
     String voiceId,
     String outputPath,
   ) async {
-    final key = await _store.read(key: _keyName);
+    final String? key;
+    try {
+      key = await _store.read(key: _keyName);
+    } catch (_) {
+      throw const AppIssue(
+        'FISH-103',
+        'The Fish Audio key could not be read.',
+        'Secure storage on this device returned an error.',
+        'Restart the app and save the key again.',
+      );
+    }
     if (key == null || key.isEmpty)
-      throw StateError('Add a Fish Audio API key in Voice settings.');
+      throw const AppIssue(
+        'FISH-101',
+        'No Fish Audio key is saved.',
+        'Fish Audio requires your own API key to make speech.',
+        'Add a key in Voice settings.',
+      );
     final selectedId = voiceIdFromInput(voiceId);
     if (selectedId.isEmpty)
-      throw StateError('Add the Fish Audio voice ID in Voice settings.');
-    final request = await _client.postUrl(endpoint);
-    request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $key');
-    request.headers.contentType = ContentType.json;
-    request.headers.set('model', 's2.1-pro-free');
-    request.write(
-      jsonEncode({
-        'text': text,
-        'reference_id': selectedId,
-        'format': 'mp3',
-        'latency': 'low',
-        'chunk_length': 100,
-      }),
-    );
-    final response = await request.close().timeout(const Duration(seconds: 30));
-    if (response.statusCode != HttpStatus.ok) {
-      await response.drain<void>();
-      if (response.statusCode == HttpStatus.unauthorized) {
-        throw const HttpException(
-          'Fish Audio rejected the saved API key (401). Replace it in Voice settings.',
-        );
-      }
-      throw HttpException(
-        'Fish Audio returned HTTP ${response.statusCode}. Check the voice ID and Fish Audio account.',
+      throw const AppIssue(
+        'FISH-102',
+        'No Fish voice is selected.',
+        'A voice ID is needed for speech.',
+        'Choose a Fish voice in Voice settings.',
       );
+    final HttpClientResponse response;
+    try {
+      final request = await _client
+          .postUrl(endpoint)
+          .timeout(const Duration(seconds: 15));
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $key');
+      request.headers.contentType = ContentType.json;
+      request.headers.set('model', 's2.1-pro-free');
+      request.write(
+        jsonEncode({
+          'text': text,
+          'reference_id': selectedId,
+          'format': 'mp3',
+          'latency': 'low',
+          'chunk_length': 100,
+        }),
+      );
+      response = await request.close().timeout(const Duration(seconds: 30));
+    } catch (error) {
+      throw AppIssue.from(error, area: IssueArea.fish);
+    }
+    if (response.statusCode != HttpStatus.ok) {
+      try {
+        await response.drain<void>().timeout(const Duration(seconds: 5));
+      } catch (_) {
+        // The HTTP status is already sufficient to explain the failure.
+      }
+      throw AppIssue.fishHttp(response.statusCode);
     }
     final contentType = response.headers.contentType?.mimeType ?? '';
     if (contentType.contains('json') || contentType.contains('text/')) {
-      final message = await utf8.decoder.bind(response).join();
-      throw StateError('Fish Audio did not return audio: $message');
+      try {
+        await response.drain<void>().timeout(const Duration(seconds: 5));
+      } catch (_) {
+        // Never display the raw response; it may echo private request data.
+      }
+      throw const AppIssue(
+        'FISH-502',
+        'Fish Audio returned no playable speech.',
+        'Its response was text instead of an audio file.',
+        'Check the voice settings and retry.',
+      );
     }
     final output = File(outputPath);
     final sink = output.openWrite();
     var bytes = 0;
+    final firstBytes = <int>[];
     try {
       await for (final chunk in response.timeout(const Duration(seconds: 90))) {
         bytes += chunk.length;
+        for (final byte in chunk) {
+          if (firstBytes.length >= 3) break;
+          firstBytes.add(byte);
+        }
         if (bytes > 20 * 1024 * 1024)
-          throw StateError('Fish Audio response was too large.');
+          throw const AppIssue(
+            'FISH-413',
+            'The voice reply was too large.',
+            'Fish Audio sent more audio than this app accepts.',
+            'Use a shorter reply and retry.',
+          );
         sink.add(chunk);
       }
       await sink.flush();
-    } catch (_) {
+    } catch (error) {
       await sink.close();
       if (await output.exists()) await output.delete();
-      rethrow;
+      throw AppIssue.from(error, area: IssueArea.fish);
     }
     await sink.close();
     if (bytes < 100) {
       await output.delete();
-      throw StateError('Fish Audio returned no playable audio.');
+      throw const AppIssue(
+        'FISH-204',
+        'Fish Audio returned an empty voice reply.',
+        'The response did not contain enough audio to play.',
+        'Try again or choose another voice.',
+      );
+    }
+    if (!hasMp3Header(firstBytes)) {
+      await output.delete();
+      throw const AppIssue(
+        'FISH-502',
+        'Fish Audio returned no playable speech.',
+        'The downloaded file was not an MP3 audio reply.',
+        'Check the voice settings and retry.',
+      );
     }
     return outputPath;
   }

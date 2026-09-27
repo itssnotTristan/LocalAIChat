@@ -451,41 +451,6 @@ final class SystemSpeechBridge: NSObject, AVSpeechSynthesizerDelegate {
     transferChannel.setMethodCallHandler { [modelTransfers = self.modelTransfers] call, result in
       modelTransfers.handle(call, result: result)
     }
-    let appIconChannel = FlutterMethodChannel(
-      name: "local_ai_chat/app_icon",
-      binaryMessenger: engineBridge.applicationRegistrar.messenger()
-    )
-    appIconChannel.setMethodCallHandler { call, result in
-      DispatchQueue.main.async {
-        switch call.method {
-        case "supports":
-          result(UIApplication.shared.supportsAlternateIcons)
-        case "current":
-          result(UIApplication.shared.alternateIconName)
-        case "set":
-          guard UIApplication.shared.supportsAlternateIcons else {
-            result(FlutterError(code: "unsupported", message: "This iPhone cannot change the app icon.", details: nil))
-            return
-          }
-          let name = call.arguments as? String
-          guard name == nil || name == "AppIconOrange" || name == "AppIconElectric" else {
-            result(FlutterError(code: "invalid_icon", message: "Unknown app icon.", details: nil))
-            return
-          }
-          UIApplication.shared.setAlternateIconName(name) { error in
-            DispatchQueue.main.async {
-              if let error = error {
-                result(FlutterError(code: "icon_change_failed", message: error.localizedDescription, details: nil))
-              } else {
-                result(nil)
-              }
-            }
-          }
-        default:
-          result(FlutterMethodNotImplemented)
-        }
-      }
-    }
     let mediaChannel = FlutterMethodChannel(
       name: "local_ai_chat/media",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
