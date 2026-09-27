@@ -53,6 +53,14 @@ class SpeechService {
     return Directory('$ttsDir/espeak-ng-data').exists();
   }
 
+  static Future<bool> hasTtsModel(String root) async {
+    final folder = '$root/kokoro-en-v0_19';
+    for (final name in ['model.onnx', 'voices.bin', 'tokens.txt']) {
+      if (!await File('$folder/$name').exists()) return false;
+    }
+    return Directory('$folder/espeak-ng-data').exists();
+  }
+
   Future<void> startRecording(
     String outputPath, {
     bool interruptPlayback = true,
@@ -149,14 +157,21 @@ class SpeechService {
     if (spoken.isEmpty) {
       throw StateError('This reply has no words to speak.');
     }
+    if ((Platform.isIOS || Platform.isAndroid) &&
+        !await hasTtsModel(rootPath)) {
+      return Uri(
+        scheme: 'system-speech',
+        queryParameters: {'text': spoken, 'voice': '$voiceId'},
+      ).toString();
+    }
     try {
       return await Isolate.run(
         () => _synthesize(rootPath, spoken, outputPath, voiceId),
       );
     } catch (_) {
-      // Kokoro may fail to allocate after a large iPhone chat model. Keep
-      // speech entirely on the device using the system's installed voices.
-      if (!Platform.isIOS) rethrow;
+      // Kokoro may fail to allocate after a large local chat model. Keep
+      // speech on the device using the platform's installed voices.
+      if (!Platform.isIOS && !Platform.isAndroid) rethrow;
       return Uri(
         scheme: 'system-speech',
         queryParameters: {'text': spoken, 'voice': '$voiceId'},
@@ -203,7 +218,11 @@ class SpeechService {
     }
   }
 
-  Future<void> playFile(String path, {double playbackRate = 1.0}) async {
+  Future<void> playFile(
+    String path, {
+    double playbackRate = 1.0,
+    bool keepMicrophoneRoute = false,
+  }) async {
     if (isSystemSpeechPath(path)) {
       final parameters = Uri.parse(path).queryParameters;
       speaking = true;
@@ -218,26 +237,30 @@ class SpeechService {
       }
       return;
     }
-    await player.stop();
-    if (Platform.isIOS) {
-      // Keep the microphone route active while the reply plays so a caller
-      // can interrupt without restarting the audio session.
-      await player.setAudioContext(
-        AudioContext(
-          iOS: AudioContextIOS(
-            category: AVAudioSessionCategory.playAndRecord,
-            options: {
-              AVAudioSessionOptions.defaultToSpeaker,
-              AVAudioSessionOptions.allowBluetooth,
-              AVAudioSessionOptions.allowBluetoothA2DP,
-            },
-          ),
-        ),
-      );
-    }
     _playStopped = Completer<void>();
     speaking = true;
     try {
+      await player.stop();
+      if (Platform.isIOS) {
+        // iOS makes this a global session change. Ordinary Fish and local TTS
+        // playback must use playback only; playAndRecord is reserved for calls
+        // where the microphone is listening for an interruption.
+        await player.setAudioContext(
+          AudioContext(
+            iOS: AudioContextIOS(
+              category: keepMicrophoneRoute
+                  ? AVAudioSessionCategory.playAndRecord
+                  : AVAudioSessionCategory.playback,
+              options: keepMicrophoneRoute
+                  ? {
+                      AVAudioSessionOptions.defaultToSpeaker,
+                      AVAudioSessionOptions.allowBluetooth,
+                    }
+                  : const {},
+            ),
+          ),
+        );
+      }
       final completed = player.onPlayerComplete.first;
       await player.play(DeviceFileSource(path));
       await player.setPlaybackRate(playbackRate.clamp(0.5, 2.0));
@@ -245,7 +268,11 @@ class SpeechService {
     } finally {
       speaking = false;
       _playStopped = null;
-      await player.stop();
+      try {
+        await player.stop();
+      } catch (_) {
+        // Preserve the original playback error for the caller.
+      }
       final file = File(path);
       if (await file.exists()) {
         try {
@@ -261,7 +288,7 @@ class SpeechService {
     if (_playStopped != null && !_playStopped!.isCompleted)
       _playStopped!.complete();
     await player.stop();
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       await _systemSpeech.invokeMethod<void>('stop');
     }
     speaking = false;

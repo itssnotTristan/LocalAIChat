@@ -2,22 +2,9 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:local_ai_chat/app_icon.dart';
 import 'package:local_ai_chat/glass_design.dart';
 
 void main() {
-  test('bundled icon names map to the iOS choices', () {
-    expect(AppIconChoice.fromNativeName(null), AppIconChoice.plasma);
-    expect(
-      AppIconChoice.fromNativeName('AppIconOrange'),
-      AppIconChoice.orange,
-    );
-    expect(
-      AppIconChoice.fromNativeName('AppIconElectric'),
-      AppIconChoice.electric,
-    );
-  });
-
   testWidgets('My Photo renders the selected local image', (tester) async {
     final photo = File('assets/icons/plasma.png').absolute;
     expect(await tester.runAsync(photo.exists), isTrue);

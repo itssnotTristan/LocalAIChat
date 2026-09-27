@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'glass_design.dart';
 import 'offline_library.dart';
+import 'app_issue.dart';
 
 class OfflineLibraryPage extends StatefulWidget {
   const OfflineLibraryPage({
@@ -43,7 +44,9 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not change pack: $error')),
+          SnackBar(
+            content: Text(AppIssue.from(error, area: IssueArea.app).display),
+          ),
         );
       }
     } finally {

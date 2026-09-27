@@ -15,6 +15,7 @@ import 'image_edit_request.dart';
 import 'image_studio_install.dart';
 import 'image_studio_models.dart';
 import 'background_model_download.dart';
+import 'app_issue.dart';
 
 class ImageStudioPage extends StatefulWidget {
   const ImageStudioPage({required this.root, required this.design, super.key});
@@ -93,7 +94,10 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
           'downloading' =>
             'Image model downloading in background · ${(matching!.received / 1048576).round()} MiB',
           'downloaded' => 'Image model downloaded. Tap Finish install.',
-          'failed' => 'Image download failed: ${matching!.error}',
+          'failed' => AppIssue.from(
+            StateError(matching!.error),
+            area: IssueArea.download,
+          ).display,
           _ => '',
         };
       });
@@ -111,7 +115,10 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
           () => status = 'Image model download started. You can leave the app.',
         );
     } catch (error) {
-      if (mounted) setState(() => status = 'Image download failed: $error');
+      if (mounted)
+        setState(
+          () => status = AppIssue.from(error, area: IssueArea.download).display,
+        );
     }
   }
 
@@ -176,7 +183,10 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
         });
       }
     } catch (error) {
-      if (mounted) setState(() => status = '$error');
+      if (mounted)
+        setState(
+          () => status = AppIssue.from(error, area: IssueArea.media).display,
+        );
     }
   }
 
@@ -204,7 +214,10 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       }
       if (mounted) setState(() => status = 'Image model ready on this device.');
     } catch (error) {
-      if (mounted) setState(() => status = 'Install paused: $error');
+      if (mounted)
+        setState(
+          () => status = AppIssue.from(error, area: IssueArea.download).display,
+        );
     } finally {
       if (mounted) setState(() => installing = false);
     }
@@ -235,7 +248,11 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       if (mounted)
         setState(() => status = 'Imported model ready on this iPhone.');
     } catch (error) {
-      if (mounted) setState(() => status = 'Model import failed: $error');
+      if (mounted)
+        setState(
+          () =>
+              status = AppIssue.from(error, area: IssueArea.imageEdit).display,
+        );
     } finally {
       if (mounted) setState(() => installing = false);
     }
@@ -248,7 +265,11 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       await refreshModels();
       if (mounted) setState(() => status = 'Image model changed.');
     } catch (error) {
-      if (mounted) setState(() => status = 'Could not change model: $error');
+      if (mounted)
+        setState(
+          () =>
+              status = AppIssue.from(error, area: IssueArea.imageEdit).display,
+        );
     }
   }
 
@@ -286,7 +307,11 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       await modelStore.rename(model.id, name);
       await refreshModels();
     } catch (error) {
-      if (mounted) setState(() => status = 'Could not rename model: $error');
+      if (mounted)
+        setState(
+          () =>
+              status = AppIssue.from(error, area: IssueArea.imageEdit).display,
+        );
     }
   }
 
@@ -321,7 +346,11 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
       await refreshModels();
       if (mounted) setState(() => status = 'Deleted ${model.name}.');
     } catch (error) {
-      if (mounted) setState(() => status = 'Could not delete model: $error');
+      if (mounted)
+        setState(
+          () =>
+              status = AppIssue.from(error, area: IssueArea.imageEdit).display,
+        );
     } finally {
       if (mounted) setState(() => installing = false);
     }
@@ -385,7 +414,11 @@ class _ImageStudioPageState extends State<ImageStudioPage> {
         });
       }
     } catch (error) {
-      if (mounted) setState(() => status = 'Edit failed: $error');
+      if (mounted)
+        setState(
+          () =>
+              status = AppIssue.from(error, area: IssueArea.imageEdit).display,
+        );
     } finally {
       if (mounted) setState(() => editing = false);
     }

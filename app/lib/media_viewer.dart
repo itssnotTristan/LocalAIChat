@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
+import 'app_issue.dart';
+
 Future<void> showLocalImage(BuildContext context, String path) => Navigator.of(
   context,
 ).push(MaterialPageRoute<void>(builder: (_) => _ImageViewer(path: path)));
@@ -72,8 +74,11 @@ class _VideoViewerState extends State<_VideoViewer> {
       await controller.play();
       if (mounted) setState(() {});
     } catch (exception) {
-      if (mounted)
-        setState(() => error = 'Could not play this video: $exception');
+      if (mounted) {
+        setState(
+          () => error = AppIssue.from(exception, area: IssueArea.media).display,
+        );
+      }
     }
   }
 

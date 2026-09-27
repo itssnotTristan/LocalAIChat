@@ -9,17 +9,25 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    // This sideloaded build includes Flutter and llama.cpp only for ARM.
+    // Do not advertise x86 support just because another plugin ships x86 .so files.
+    packaging {
+        jniLibs {
+            excludes += setOf("**/x86/**", "**/x86_64/**")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.localai.local_ai_chat"
+        applicationId = "com.fluxlira.app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // The native llama.cpp runtime requires Android 9 or newer.
+        minSdk = 28
         targetSdk = flutter.targetSdkVersion
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
