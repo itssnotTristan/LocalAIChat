@@ -77,7 +77,10 @@ class _UserProfilePageState extends State<UserProfilePage> {
     final rawAge = ageController.text.trim();
     final age = rawAge.isEmpty ? null : int.tryParse(rawAge);
     if (rawAge.isNotEmpty && (age == null || age < 1 || age > 120)) {
-      setState(() => error = 'Enter an age from 1 to 120, or leave it blank.');
+      setState(
+        () => error =
+            'PROFILE-400 · Enter an age from 1 to 120, or leave it blank.',
+      );
       return;
     }
     final chosenGender = gender == 'Self describe'

@@ -677,7 +677,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         if (!sheetContext.mounted) return;
                         if (!valid) {
                           update(
-                            () => error = 'That owner code did not match.',
+                            () => error = 'ACCESS-401 · That owner code did not match. Check the code on your device and try again.',
                           );
                           return;
                         }
@@ -4213,15 +4213,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             );
                             if (newKey.isEmpty && !keySaved) {
                               update(
-                                () => fishKeyStatus =
-                                    'Paste a Fish Audio API key first.',
+                                () => fishKeyStatus = 'FISH-101 · No Fish Audio key is saved. Paste your key first.',
                               );
                               return;
                             }
                             if (newVoiceId.isEmpty) {
                               update(
-                                () => fishKeyStatus =
-                                    'Paste a Fish voice link or ID first.',
+                                () => fishKeyStatus = 'FISH-102 · No Fish voice is selected. Paste a voice link or ID first.',
                               );
                               return;
                             }
@@ -4337,7 +4335,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   keySaved = retained;
                                   fishHasKey = retained;
                                   fishKeyStatus = retained
-                                      ? 'Could not remove the saved Fish Audio key.'
+                                      ? 'FISH-103 · Secure storage did not remove the Fish Audio key. Try again.'
                                       : 'Saved Fish Audio key removed.';
                                 });
                               } catch (error) {
