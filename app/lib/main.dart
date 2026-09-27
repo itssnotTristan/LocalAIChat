@@ -563,6 +563,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
+  bool get statusHasIssue => RegExp(r'^[A-Z]+-\d{3}\b').hasMatch(status);
+
+  void showStatusDetails() {
+    if (!statusHasIssue) return;
+    final details = status;
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('What happened'),
+        content: SelectableText(details),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
   String explain(Object error, IssueArea area) =>
       AppIssue.from(error, area: area).display;
 
@@ -4860,11 +4880,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     child: Row(
                       children: [
                         Expanded(
-                          child: Text(
-                            status,
-                            style: Theme.of(context).textTheme.bodySmall,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
+                          child: InkWell(
+                            onTap: statusHasIssue ? showStatusDetails : null,
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    status,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodySmall,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                if (statusHasIssue)
+                                  const Icon(Icons.info_outline, size: 18),
+                              ],
+                            ),
                           ),
                         ),
                         PopupMenuButton<InferenceProfile>(
